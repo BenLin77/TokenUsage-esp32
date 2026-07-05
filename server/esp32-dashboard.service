@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh ESP32 dashboard JSON
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=youruser
+WorkingDirectory=/opt/esp32-dashboard
+Environment=PATH=/home/youruser/.local/bin:/home/youruser/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=DASHBOARD_OUTPUT=/var/www/esp32-dashboard/dashboard.json
+ExecStart=/usr/bin/python3 /opt/esp32-dashboard/dashboard_collector.py

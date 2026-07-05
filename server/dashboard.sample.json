@@ -1,0 +1,55 @@
+{
+  "weather": {
+    "city": "Taipei",
+    "city_zh": "台北市",
+    "temp_c": 27,
+    "condition": "partly_cloudy",
+    "label": "Partly cloudy",
+    "rain_pct": 40,
+    "rain_mm": 0.0,
+    "is_raining": false,
+    "rain_alert": false,
+    "aqi": 42,
+    "uv": 8,
+    "sunrise": "05:08",
+    "sunset": "18:48",
+    "weekday": "Tue",
+    "day": "30",
+    "month": "Jun",
+    "year": "2026",
+    "date": "Jun 30",
+    "hourly": [
+      { "t": "14", "temp": 34, "rain": 45, "precip": 0.0 },
+      { "t": "15", "temp": 33, "rain": 50, "precip": 0.3 },
+      { "t": "16", "temp": 32, "rain": 60, "precip": 1.2 }
+    ]
+  },
+  "claude": {
+    "h5": { "used_pct": 28, "reset": "2h10m", "tokens": 1240000, "cost_twd": 18 },
+    "weekly": { "used_pct": 59, "reset": "5d4h", "tokens": 18700000, "cost_twd": 260 },
+    "daily": [0, 120000, 450000, 320000, 0, 800000, 1240000],
+    "total_tok": 24200000,
+    "total_twd": 412,
+    "models": [
+      { "name": "opus-4-8", "pct": 78, "tok": 18800000 },
+      { "name": "haiku-4-5", "pct": 22, "tok": 5400000 }
+    ]
+  },
+  "codex": {
+    "h5": { "used_pct": 18, "reset": "4h7m", "tokens": 980000, "cost_twd": 11 },
+    "weekly": { "used_pct": 34, "reset": "6d1h", "tokens": 15600000, "cost_twd": 180 },
+    "daily": [0, 90000, 210000, 500000, 0, 700000, 980000],
+    "total_tok": 21100000,
+    "total_twd": 305,
+    "models": [
+      { "name": "gpt-5.5", "pct": 91, "tok": 19200000 },
+      { "name": "gpt-5.3-codex-spark", "pct": 9, "tok": 1900000 }
+    ]
+  },
+  "meta": {
+    "source": "server dashboard",
+    "quota_source": "live",
+    "generated_at": "2026-06-30T14:00:00+08:00",
+    "timezone": "Asia/Taipei"
+  }
+}

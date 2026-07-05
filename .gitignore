@@ -1,0 +1,28 @@
+# Local secrets — keep only templates/examples in version control.
+/.env
+/.env.*
+!/server/.env.example
+/firmware/src/dashboard_config.h
+
+# Collector local state
+/server/.env
+/server/.weather_cache.json
+/server/.location_cache.json
+/server/.city_zh_cache.json
+
+# PlatformIO / Python build artifacts
+.pio/
+/.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OMX runtime
+/.omx/
+
+# Vendor/reference package and bulky local-only artifacts
+/慧勤智远 ESP32-S3 N16R8 V1.0-3.5寸电容屏开发套件/
+*.jpg
+*.jpeg
+*.png
+!/docs/images/*.jpg
