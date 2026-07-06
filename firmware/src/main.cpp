@@ -471,6 +471,19 @@ String formatTokens(int64_t tokens) {
   return String((long)tokens);
 }
 
+// All-time API-equivalent cost as "$80,208" (thousands grouped). twd < 0 → "".
+String formatTwd(int twd) {
+  if (twd < 0) return "";
+  String digits = String(twd);
+  String out;
+  int n = digits.length();
+  for (int i = 0; i < n; i++) {
+    if (i > 0 && (n - i) % 3 == 0) out += ',';
+    out += digits[i];
+  }
+  return "$" + out;
+}
+
 WeatherKind parseWeatherKind(const String& condition) {
   String c = condition;
   c.toLowerCase();
@@ -961,30 +974,56 @@ void drawQuotaBlock(int x, int y, int w, const char* label, const QuotaState& qu
   drawUsageBar(x, y + 60, w, used, accent, quota.known);
 }
 
-// Floating "z z z" for a dozing mascot — a trio climbing up-right off the head
-// with a subtle 1px bob. Drawn transparently; the full-frame repaint clears the
-// previous positions, so it leaves no residue.
+// Blend two 0xRRGGBB colours channel-wise; t=0 → a, t=1 → b.
+uint32_t lerpColor(uint32_t a, uint32_t b, float t) {
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+  int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+  int r = ar + (int)((br - ar) * t);
+  int g = ag + (int)((bg - ag) * t);
+  int bl = ab + (int)((bb - ab) * t);
+  return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)bl;
+}
+
+// Floating "z z z" for a dozing mascot: a trio drifting up-and-right off the
+// head on a slow 8-frame loop. Each z is born small and bright near the head,
+// then grows and fades as it climbs, wrapping back to the bottom — so even at
+// the 1 fps render cadence the trail is always gently moving. CYCLE divides 256
+// so the uint8_t animationFrame wrap stays seamless. Drawn transparently; the
+// full-frame repaint clears old positions, so it leaves no residue.
 void drawSleepZ(int x, int y, uint32_t color) {
-  gfx->setFont(&fonts::Font2);
-  gfx->setTextSize(1);
-  gfx->setTextColor(color);
-  const int lift = animationFrame % 2;
-  const int8_t dx[3] = {0, 6, 12};
-  const int8_t dy[3] = {0, -7, -14};
+  const uint8_t CYCLE = 8;
+  const float base = (animationFrame % CYCLE) / (float)CYCLE;
+  gfx->setFont(&fonts::Font0);
   for (int i = 0; i < 3; i++) {
-    gfx->setCursor(x + dx[i], y + dy[i] - lift);
+    float p = base + i / 3.0f;      // stagger the trio along the path
+    if (p >= 1.0f) p -= 1.0f;
+    int px = x + (int)(p * 9.0f);   // drift right as it rises
+    int py = y - (int)(p * 16.0f);  // climb up off the head
+    gfx->setTextSize(1 + (int)(p * 2.0f));       // 1 → 3: small near head, big up top
+    gfx->setTextColor(lerpColor(color, COLOR_PANEL, p * 0.85f));  // fade out near the top
+    gfx->setCursor(px, py);
     gfx->print("z");
   }
+  gfx->setTextSize(1);  // restore: callers set their own font but assume size 1
 }
 
 void drawClaudeMascot(int x, int y, bool doze) {
-  bool blink = doze || animationFrame % 8 == 0;
+  bool blink = animationFrame % 8 == 0;
   gfx->fillRect(x + 8, y, 24, 6, COLOR_CLAUDE);
   gfx->fillRect(x + 4, y + 6, 32, 8, COLOR_CLAUDE);
   gfx->fillRect(x, y + 14, 40, 16, COLOR_CLAUDE);
   gfx->fillRect(x + 8, y + 30, 6, 6, COLOR_CLAUDE);
   gfx->fillRect(x + 26, y + 30, 6, 6, COLOR_CLAUDE);
-  if (blink) {
+  if (doze) {
+    // Content sleepy curves ‿ ‿ — flat lash with the corners ticked up.
+    gfx->drawFastHLine(x + 10, y + 16, 5, COLOR_BG);
+    gfx->drawPixel(x + 9, y + 15, COLOR_BG);
+    gfx->drawPixel(x + 15, y + 15, COLOR_BG);
+    gfx->drawFastHLine(x + 25, y + 16, 5, COLOR_BG);
+    gfx->drawPixel(x + 24, y + 15, COLOR_BG);
+    gfx->drawPixel(x + 30, y + 15, COLOR_BG);
+  } else if (blink) {
     gfx->drawFastHLine(x + 10, y + 16, 5, COLOR_BG);
     gfx->drawFastHLine(x + 25, y + 16, 5, COLOR_BG);
   } else {
@@ -993,13 +1032,21 @@ void drawClaudeMascot(int x, int y, bool doze) {
   }
   gfx->fillRect(x - 4, y + 20, 4, 6, COLOR_CLAUDE);
   gfx->fillRect(x + 40, y + 20, 4, 6, COLOR_CLAUDE);
-  if (doze) drawSleepZ(x + 38, y - 6, COLOR_CLAUDE);
+  if (doze) drawSleepZ(x + 38, y - 6, COLOR_TEXT);
 }
 
 void drawCodexMascot(int x, int y, bool doze) {
-  bool blink = doze || animationFrame % 8 == 4;
+  bool blink = animationFrame % 8 == 4;
   gfx->fillRoundRect(x + 3, y + 2, 36, 30, 5, COLOR_CODEX);
-  if (blink) {
+  if (doze) {
+    // Content sleepy curves ‿ ‿ — flat lash with the corners ticked up.
+    gfx->drawFastHLine(x + 11, y + 13, 6, COLOR_BG);
+    gfx->drawPixel(x + 10, y + 12, COLOR_BG);
+    gfx->drawPixel(x + 17, y + 12, COLOR_BG);
+    gfx->drawFastHLine(x + 25, y + 13, 6, COLOR_BG);
+    gfx->drawPixel(x + 24, y + 12, COLOR_BG);
+    gfx->drawPixel(x + 31, y + 12, COLOR_BG);
+  } else if (blink) {
     gfx->drawFastHLine(x + 11, y + 13, 6, COLOR_BG);
     gfx->drawFastHLine(x + 25, y + 13, 6, COLOR_BG);
   } else {
@@ -1012,7 +1059,7 @@ void drawCodexMascot(int x, int y, bool doze) {
   gfx->drawFastHLine(x + 36, y + 12, 6, COLOR_CODEX);
   gfx->drawFastVLine(x + 14, y - 2, 6, COLOR_CODEX);
   gfx->drawFastVLine(x + 28, y - 2, 6, COLOR_CODEX);
-  if (doze) drawSleepZ(x + 34, y - 4, COLOR_CODEX);
+  if (doze) drawSleepZ(x + 34, y - 4, COLOR_TEXT);
 }
 
 void drawAgentTile(int x, int y, const String& title, uint32_t accent, const QuotaState& h5, const QuotaState& weekly, bool codex) {
@@ -1023,9 +1070,9 @@ void drawAgentTile(int x, int y, const String& title, uint32_t accent, const Quo
   int bob = doze ? (animationFrame % 2 ? 1 : 0)
                  : ((animationFrame % 4 == 1) ? -1 : ((animationFrame % 4 == 3) ? 1 : 0));
   if (codex) {
-    drawCodexMascot(x + 14, y + 15 + bob, doze);
+    drawCodexMascot(x + 8, y + 15 + bob, doze);
   } else {
-    drawClaudeMascot(x + 15, y + 14 + bob, doze);
+    drawClaudeMascot(x + 8, y + 14 + bob, doze);
   }
 
   gfx->setTextColor(COLOR_TEXT, COLOR_PANEL);
@@ -1688,6 +1735,18 @@ void drawDetailPage(const char* title, uint32_t accent, const QuotaState& h5,
   gfx->printf("Wk %s tok", formatTokens(weekly.tokens).c_str());
   gfx->setCursor(28, 446);
   gfx->printf(tr("All-time %s tok", "累計 %s tok"), formatTokens(chart.totalTok).c_str());
+
+  // API-equivalent cost is this page's headline number, so make it pop: the
+  // agent's accent colour + a big face, right-aligned on the all-time row. The
+  // leading "~" reads as "about / equivalent" so it isn't mistaken for a bill.
+  String cost = formatTwd(chart.totalTwd);
+  if (cost.length()) {
+    String big = "~" + cost;
+    gfx->setFont(&fonts::DejaVu24);
+    gfx->setTextColor(accent, COLOR_PANEL);
+    gfx->setCursor(284 - gfx->textWidth(big), 438);
+    gfx->print(big);
+  }
   gfx->setFont(&fonts::Font2);
   present();
 }
