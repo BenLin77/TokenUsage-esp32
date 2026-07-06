@@ -17,7 +17,7 @@ The repo has two sibling folders — `firmware/` (the ESP32 build) and `server/`
 ```
   ┌──────────────┐     builds       ┌────────────────────────┐    HTTP GET     ┌───────────────┐
   │ server (VPS) │ ───────────────▶ │ /var/www/.../           │ ◀────────────── │ ESP32-S3      │
-  │ collector.py │  every 3 min     │ dashboard.json (nginx)  │   every 120 s   │ firmware      │
+  │ collector.py │  every 1 min     │ dashboard.json (nginx)  │   every 60 s    │ firmware      │
   └──────────────┘                  └────────────────────────┘                 └───────────────┘
    Codex app-server + ccusage + CWA/open-meteo                                   renders to LCD
 ```
@@ -76,14 +76,14 @@ Read top-to-bottom; it is organized in this order:
 loop():
   if setupMode: service DNS + web server + setup touch; return
   handleTouch()                                  # long-press → setup portal
-  every DASHBOARD_REFRESH_MS (120 s):            # from dashboard_config.h
+  every DASHBOARD_REFRESH_MS (60 s):             # from dashboard_config.h
       maybeReconnectWifi(); fetchDashboardState()
   every RENDER_INTERVAL_MS (1 s):
       animationFrame++; applyAutoBrightness(); drawDashboard()   # → present()
 ```
 
-Fetch and render are **decoupled**: the device fetches every 2 min, the server
-publishes every 3 min, and the screen (clock, animation, freshness age)
+Fetch and render are **decoupled**: the device fetches every 1 min, the server
+publishes every 1 min, and the screen (clock, animation, freshness age)
 refreshes every 1 s. Double buffering makes the 1 s full repaint flicker-free.
 
 ## API contract
@@ -203,5 +203,5 @@ touching `board_config.h` or the render target.
   clear day.
 - Output is written atomically to `DASHBOARD_OUTPUT`. Config via env / a `.env`
   next to the script. Deployed by `server/esp32-dashboard.{service,timer}`
-  (timer runs every 3 min; device fetches every 120 s). The deployed collector
+  (timer runs every 1 min; device fetches every 60 s). The deployed collector
   file is root-owned — deploy with `scp` to `/tmp` then `sudo cp`.

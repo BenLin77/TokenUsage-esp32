@@ -1,9 +1,9 @@
 [Unit]
-Description=Run ESP32 dashboard collector every 3 minutes
+Description=Run ESP32 dashboard collector every 1 minute
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=3min
+OnUnitActiveSec=1min
 AccuracySec=15s
 Persistent=true
 Unit=esp32-dashboard.service

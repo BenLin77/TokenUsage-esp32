@@ -11,7 +11,7 @@
 #define DASHBOARD_API_URL ""
 
 #define DASHBOARD_CITY "Taipei"
-#define DASHBOARD_REFRESH_MS 120000UL
+#define DASHBOARD_REFRESH_MS 60000UL
 
 // --- Optional overrides (safe to leave commented; defaults shown) -----------
 // The device clock uses a POSIX TZ string. Default is Taipei (UTC+8, no DST).

@@ -53,17 +53,17 @@ The display pin map is based on the vendor package at `慧勤智远 ESP32-S3 N16
 
 Two parts talk over one HTTP JSON file. The **server** gathers the data and
 publishes `dashboard.json`; the **firmware** (a thin client) fetches and renders
-it. They are decoupled — the server refreshes every ~3 min, the device polls
-every 2 min — so neither blocks the other.
+it. They are decoupled — the server refreshes every ~1 min, the device polls
+every 1 min — so neither blocks the other.
 
 ```
  server/  (a small VPS)                            firmware/  (ESP32-S3 device)
  ┌────────────────────────────┐                    ┌─────────────────────────────┐
  │ dashboard_collector.py      │   writes           │ main.cpp                    │
- │  • Codex app-server + ccusage│ ─────────┐         │  • HTTP GET every 120 s     │
+ │  • Codex app-server + ccusage│ ─────────┐         │  • HTTP GET every 60 s      │
  │  • CWA / open-meteo weather │          ▼         │  • parse JSON               │
  │  • AQI / UV / sun times     │   dashboard.json   │  • draw to 320x480 LCD      │
- │ run every 3 min by systemd  │   (served by   ──HTTP──▶ (PSRAM double buffer)   │
+ │ run every 1 min by systemd  │   (served by   ──HTTP──▶ (PSRAM double buffer)   │
  │ nginx serves /dashboard.json│    nginx)          │  • touch UI, Wi-Fi setup    │
  └────────────────────────────┘                    └─────────────────────────────┘
 ```
@@ -281,7 +281,7 @@ Installed files on the server (paths are examples — adjust to your host):
 - `/etc/nginx/sites-available/esp32-dashboard`
 - `/var/www/esp32-dashboard/dashboard.json`
 
-The timer runs every 3 minutes. Useful checks:
+The timer runs every 1 minute. Useful checks:
 
 ```bash
 systemctl status esp32-dashboard.timer --no-pager
