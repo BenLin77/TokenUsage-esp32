@@ -454,6 +454,14 @@ bool anyQuotaCritical() {
          agentCritical(state.claude5h, state.claudeWeekly);
 }
 
+// True when either usage bar has gone red (danger zone) — the agent is nearly
+// out of quota, so its mascot nods off. Matches the bar colour exactly so the
+// nap kicks in the moment the bar turns red.
+bool agentDozing(const QuotaState& h5, const QuotaState& weekly) {
+  return colorForRemaining(remainingPct(h5)) == COLOR_DANGER ||
+         colorForRemaining(remainingPct(weekly)) == COLOR_DANGER;
+}
+
 // Compact token count: 3.3B / 12.3M / 456K / 789.
 String formatTokens(int64_t tokens) {
   if (tokens < 0) return "--";
@@ -953,8 +961,24 @@ void drawQuotaBlock(int x, int y, int w, const char* label, const QuotaState& qu
   drawUsageBar(x, y + 60, w, used, accent, quota.known);
 }
 
-void drawClaudeMascot(int x, int y) {
-  bool blink = animationFrame % 8 == 0;
+// Floating "z z z" for a dozing mascot — a trio climbing up-right off the head
+// with a subtle 1px bob. Drawn transparently; the full-frame repaint clears the
+// previous positions, so it leaves no residue.
+void drawSleepZ(int x, int y, uint32_t color) {
+  gfx->setFont(&fonts::Font2);
+  gfx->setTextSize(1);
+  gfx->setTextColor(color);
+  const int lift = animationFrame % 2;
+  const int8_t dx[3] = {0, 6, 12};
+  const int8_t dy[3] = {0, -7, -14};
+  for (int i = 0; i < 3; i++) {
+    gfx->setCursor(x + dx[i], y + dy[i] - lift);
+    gfx->print("z");
+  }
+}
+
+void drawClaudeMascot(int x, int y, bool doze) {
+  bool blink = doze || animationFrame % 8 == 0;
   gfx->fillRect(x + 8, y, 24, 6, COLOR_CLAUDE);
   gfx->fillRect(x + 4, y + 6, 32, 8, COLOR_CLAUDE);
   gfx->fillRect(x, y + 14, 40, 16, COLOR_CLAUDE);
@@ -969,10 +993,11 @@ void drawClaudeMascot(int x, int y) {
   }
   gfx->fillRect(x - 4, y + 20, 4, 6, COLOR_CLAUDE);
   gfx->fillRect(x + 40, y + 20, 4, 6, COLOR_CLAUDE);
+  if (doze) drawSleepZ(x + 38, y - 6, COLOR_CLAUDE);
 }
 
-void drawCodexMascot(int x, int y) {
-  bool blink = animationFrame % 8 == 4;
+void drawCodexMascot(int x, int y, bool doze) {
+  bool blink = doze || animationFrame % 8 == 4;
   gfx->fillRoundRect(x + 3, y + 2, 36, 30, 5, COLOR_CODEX);
   if (blink) {
     gfx->drawFastHLine(x + 11, y + 13, 6, COLOR_BG);
@@ -987,15 +1012,20 @@ void drawCodexMascot(int x, int y) {
   gfx->drawFastHLine(x + 36, y + 12, 6, COLOR_CODEX);
   gfx->drawFastVLine(x + 14, y - 2, 6, COLOR_CODEX);
   gfx->drawFastVLine(x + 28, y - 2, 6, COLOR_CODEX);
+  if (doze) drawSleepZ(x + 34, y - 4, COLOR_CODEX);
 }
 
 void drawAgentTile(int x, int y, const String& title, uint32_t accent, const QuotaState& h5, const QuotaState& weekly, bool codex) {
   drawPanel(x, y, 146, 224);
-  int bob = (animationFrame % 4 == 1) ? -1 : ((animationFrame % 4 == 3) ? 1 : 0);
+  bool doze = agentDozing(h5, weekly);
+  // A dozing mascot nods slowly (2px, every other frame) instead of the lively
+  // 4-frame bob, so a maxed-out agent reads as sleepy rather than perky.
+  int bob = doze ? (animationFrame % 2 ? 1 : 0)
+                 : ((animationFrame % 4 == 1) ? -1 : ((animationFrame % 4 == 3) ? 1 : 0));
   if (codex) {
-    drawCodexMascot(x + 14, y + 15 + bob);
+    drawCodexMascot(x + 14, y + 15 + bob, doze);
   } else {
-    drawClaudeMascot(x + 15, y + 14 + bob);
+    drawClaudeMascot(x + 15, y + 14 + bob, doze);
   }
 
   gfx->setTextColor(COLOR_TEXT, COLOR_PANEL);
