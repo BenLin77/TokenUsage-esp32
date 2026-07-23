@@ -83,20 +83,43 @@ class CollectorReliabilityTests(unittest.TestCase):
         "rain_alert": False,
     }
     hourly = [
-        {"t": "14", "temp": 31, "rain": 76, "precip": 0.8},
-        {"t": "15", "temp": 31, "rain": 89, "precip": 2.1},
+        {"t": "14", "temp": 31, "rain": 95, "precip": 2.0},
+        {"t": "15", "temp": 31, "rain": 98, "precip": 3.0},
         {"t": "16", "temp": 32, "rain": 95, "precip": 3.0},
         {"t": "17", "temp": 31, "rain": 90, "precip": 2.5},
     ]
 
     collector.apply_near_term_rain_forecast(weather, hourly)
 
-    # Only the imminent window (current + next hour) drives the alert.
-    self.assertEqual(89, weather["rain_pct"])
+    # Only a strong, corroborated current-hour forecast drives the amber alert.
+    self.assertEqual(95, weather["rain_pct"])
     self.assertTrue(weather["rain_alert"])
     self.assertFalse(weather["is_raining"])
-    self.assertEqual("rain", weather["condition"])
-    self.assertEqual("Rain soon", weather["label"])
+    self.assertEqual("partly_cloudy", weather["condition"])
+    self.assertEqual("Partly cloudy", weather["label"])
+
+  def test_near_term_forecast_ignores_scattered_next_hour_signal(self) -> None:
+    weather = {
+        "city": "Zhonghe",
+        "temp_c": 33,
+        "condition": "partly_cloudy",
+        "label": "Partly cloudy",
+        "rain_pct": 10,
+        "rain_mm": 0.0,
+        "is_raining": False,
+        "rain_alert": False,
+    }
+    hourly = [
+        {"t": "13", "temp": 29, "rain": 83, "precip": 1.2},
+        {"t": "14", "temp": 30, "rain": 98, "precip": 1.0},
+    ]
+
+    collector.apply_near_term_rain_forecast(weather, hourly)
+
+    self.assertEqual(83, weather["rain_pct"])
+    self.assertFalse(weather["rain_alert"])
+    self.assertEqual("partly_cloudy", weather["condition"])
+    self.assertEqual("Partly cloudy", weather["label"])
 
   def test_near_term_forecast_does_not_alert_on_high_prob_but_no_precip(self) -> None:
     weather = {
@@ -118,29 +141,22 @@ class CollectorReliabilityTests(unittest.TestCase):
 
     collector.apply_near_term_rain_forecast(weather, hourly)
 
-    self.assertEqual(85, weather["rain_pct"])
+    self.assertEqual(80, weather["rain_pct"])
     self.assertFalse(weather["rain_alert"])
     self.assertEqual("partly_cloudy", weather["condition"])
     self.assertEqual("Partly cloudy", weather["label"])
 
-  def test_near_term_forecast_clears_uncorroborated_provider_alert(self) -> None:
+  def test_normalize_weather_does_not_alert_on_probability_alone(self) -> None:
     weather = collector.normalize_weather({
         "city": "Zhonghe",
         "temp_c": 34,
         "condition": "partly_cloudy",
         "label": "Partly cloudy",
-        "rain_pct": 75,
+        "rain_pct": 95,
         "rain_mm": 0.0,
         "is_raining": False,
         "rain_alert": False,
     })
-    self.assertTrue(weather["rain_alert"])
-    hourly = [
-        {"t": "14", "temp": 34, "rain": 75, "precip": 0.0},
-        {"t": "15", "temp": 34, "rain": 80, "precip": 0.0},
-    ]
-
-    collector.apply_near_term_rain_forecast(weather, hourly)
 
     self.assertFalse(weather["rain_alert"])
     self.assertEqual("partly_cloudy", weather["condition"])
@@ -187,7 +203,7 @@ class CollectorReliabilityTests(unittest.TestCase):
     self.assertTrue(weather["rain_alert"])
     self.assertEqual("rain", weather["condition"])
 
-  def test_near_term_forecast_without_precip_field_keeps_probability_fallback(self) -> None:
+  def test_near_term_forecast_without_precip_field_does_not_alert(self) -> None:
     weather = {
         "city": "Zhonghe",
         "temp_c": 32,
@@ -199,15 +215,15 @@ class CollectorReliabilityTests(unittest.TestCase):
         "rain_alert": False,
     }
     hourly = [
-        {"t": "14", "temp": 32, "rain": 75},
-        {"t": "15", "temp": 31, "rain": 80},
+        {"t": "14", "temp": 32, "rain": 95},
+        {"t": "15", "temp": 31, "rain": 98},
     ]
 
     collector.apply_near_term_rain_forecast(weather, hourly)
 
-    self.assertTrue(weather["rain_alert"])
-    self.assertEqual("rain", weather["condition"])
-    self.assertEqual("Rain soon", weather["label"])
+    self.assertFalse(weather["rain_alert"])
+    self.assertEqual("partly_cloudy", weather["condition"])
+    self.assertEqual("Partly cloudy", weather["label"])
 
   def test_near_term_forecast_ignores_spike_beyond_imminent_window(self) -> None:
     weather = {
@@ -230,7 +246,7 @@ class CollectorReliabilityTests(unittest.TestCase):
 
     collector.apply_near_term_rain_forecast(weather, hourly)
 
-    self.assertEqual(25, weather["rain_pct"])
+    self.assertEqual(20, weather["rain_pct"])
     self.assertFalse(weather["rain_alert"])
     self.assertEqual("partly_cloudy", weather["condition"])
 
@@ -278,7 +294,7 @@ class CollectorReliabilityTests(unittest.TestCase):
     self.assertFalse(weather["rain_alert"])
     self.assertEqual(30, weather["rain_pct"])
 
-  def test_cwa_weather_keeps_thunderstorm_when_high_probability(self) -> None:
+  def test_cwa_weather_downgrades_dry_high_probability_forecast(self) -> None:
     now = datetime(2026, 7, 3, 12, 15, tzinfo=collector.TZ)
     forecast = {
         "records": {
@@ -304,7 +320,9 @@ class CollectorReliabilityTests(unittest.TestCase):
          patch.object(collector, "cwa_observation", return_value=(31, 0.0)):
       weather = collector.cwa_weather(now, {"city": "Zhonghe"})
 
-    self.assertEqual("thunderstorm", weather["condition"])
+    self.assertEqual("cloudy", weather["condition"])
+    self.assertFalse(weather["is_raining"])
+    self.assertFalse(weather["rain_alert"])
 
   def _township_payload(self) -> dict:
     return {

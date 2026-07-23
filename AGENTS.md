@@ -183,13 +183,14 @@ touching `board_config.h` or the render target.
   `WEATHER_CACHE_TTL` seconds. Open-Meteo hourly forecast is always used as a
   near-term rain overlay at the selected coordinates: the dashboard `rain_pct`
   is promoted to the max probability in the current hour + next
-  `DASHBOARD_RAIN_LOOKAHEAD_HOURS` hours (default 1). `rain_alert` fires only on
+  `DASHBOARD_RAIN_LOOKAHEAD_HOURS` hours (default 0). `rain_alert` fires only on
   observed rain (`rain_mm > 0`, red drop) or an hourly point whose probability
-  is at least `RAIN_ALERT_PCT` (default 70) **and whose same-hour expected rain**
-  is at least `RAIN_ALERT_PRECIP_MM` (default 0.2 mm, amber drop). A
-  rain/thunderstorm condition alone does **not** alert. The base rule is
-  computed in `normalize_weather()`, then `apply_near_term_rain_forecast()`
-  replaces it with the corroborated near-term result when hourly data exists.
+  is at least `RAIN_ALERT_PCT` (default 90) **and whose same-hour expected rain**
+  is at least `RAIN_ALERT_PRECIP_MM` (default 1.5 mm, amber drop). Forecast
+  alerts do not rewrite the main weather icon, and hourly data without expected
+  precipitation cannot alert. The base rule is computed in
+  `normalize_weather()`, then `apply_near_term_rain_forecast()` adds only the
+  corroborated near-term amber result.
 - CWA forecast granularity: by default the collector reads the **county** (縣市)
   forecast `F-C0032-001` for `DASHBOARD_CWA_LOCATION`. Set `DASHBOARD_CWA_TOWN`
   (e.g. `中和區`) to instead read the district-accurate **township** (鄉鎮)
@@ -200,7 +201,7 @@ touching `board_config.h` or the render target.
   station `DASHBOARD_CWA_STATION` (township `溫度` is only a fallback).
 - Rain-icon honesty: `cwa_condition_from_text(text, allow_precip)` only trusts a
   雷/雨/雪 phrase when it is actually raining or `rain_pct >= RAIN_CONDITION_PCT`
-  (default 60). Otherwise the phrase reads through to its dry sky state
+  (default 101, so observed rain only). Otherwise the phrase reads through to its dry sky state
   (多雲/晴/陰), so a low-probability forecast no longer shows a rain icon on a
   clear day.
 - Output is written atomically to `DASHBOARD_OUTPUT`. Config via env / a `.env`

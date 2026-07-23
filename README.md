@@ -302,9 +302,10 @@ variables:
 | `CWA_API_KEY` | *(blank)* | Optional Taiwan CWA key; blank → open-meteo weather. |
 | `DASHBOARD_CWA_LOCATION` / `_STATION` / `_TOWN` | `臺北市` / `臺北` / blank | CWA county/township targeting (only with a key). |
 | `DASHBOARD_AUTO_LOCATION` | `0` | `1` = infer city from the device's IP when no coordinates are set. |
-| `DASHBOARD_RAIN_ALERT_PCT` | `70` | Rain-chance % that triggers the alert ring. |
-| `DASHBOARD_RAIN_LOOKAHEAD_HOURS` | `1` | Only alert for rain within the next N hours. |
-| `DASHBOARD_RAIN_ALERT_PRECIP_MM` | `0.2` | Same-hour expected rain required to corroborate an alert. |
+| `DASHBOARD_RAIN_ALERT_PCT` | `90` | Rain-chance % required for an amber forecast alert. |
+| `DASHBOARD_RAIN_CONDITION_PCT` | `101` | Probability required for CWA forecast text to paint a rain icon; `101` means observed rain only. |
+| `DASHBOARD_RAIN_LOOKAHEAD_HOURS` | `0` | Additional future hours allowed to trigger an alert; `0` means current hour only. |
+| `DASHBOARD_RAIN_ALERT_PRECIP_MM` | `1.5` | Same-hour expected rain required to corroborate an amber alert. |
 | `DASHBOARD_WEATHER_CACHE_TTL` | `90` | Weather cache lifetime (seconds). |
 | `DASH_CLAUDE_5H_LIMIT` / `_WEEKLY_LIMIT` | `50000000` / `100000000` | Token limits used to compute Claude % used. |
 | `DASH_USD_TWD` | `32.5` | USD→TWD rate for the `cost_twd` figures. |
@@ -318,11 +319,11 @@ not block fresh quota reads after a CLI update.
 For weather accuracy, set fixed coordinates in the server `.env` with
 `DASHBOARD_LAT` and `DASHBOARD_LON`. If those are blank, optional
 `DASHBOARD_AUTO_LOCATION=1` can infer city-level coordinates from the latest
-ESP32 requester IP in nginx logs. The main weather tile uses the highest rain
-probability from the current hour plus the configured look-ahead (one hour by
-default). An alert requires the same hourly point to meet both the probability
-and expected-rain thresholds, so separate forecast spikes cannot create a false
-`Rain soon`.
+ESP32 requester IP in nginx logs. By default only the current hour can trigger
+an amber forecast alert; later hours remain visible in the hourly strip. The
+same hourly point must meet both the probability and expected-rain thresholds.
+Forecast alerts do not replace the main weather icon, and hourly data without
+expected precipitation cannot alert.
 
 ## Sources
 

@@ -63,21 +63,20 @@ CWA_TOWN = os.environ.get("DASHBOARD_CWA_TOWN", "").strip()
 CWA_TOWNSHIP_DATASET = os.environ.get("DASHBOARD_CWA_TOWNSHIP_DATASET", "F-D0047-069")
 # Amber "likely rain soon" heads-up threshold. Observed rain (rain_mm > 0)
 # always alerts (red) regardless of this.
-RAIN_ALERT_PCT = int(os.environ.get("DASHBOARD_RAIN_ALERT_PCT", "70"))
-# CWA's Wx phrase is a city-wide, multi-hour forecast, so a summer "午後雷陣雨"
-# wording paints a thunderstorm icon on a dry, sunny afternoon. Only let the
-# rain/thunderstorm *icon* stand when it is actually raining now (rain_mm > 0)
-# or the forecast probability is at least this high; otherwise fall back to the
-# non-precip reading of the same phrase (多雲/晴/陰...).
-RAIN_CONDITION_PCT = int(os.environ.get("DASHBOARD_RAIN_CONDITION_PCT", "60"))
+RAIN_ALERT_PCT = int(os.environ.get("DASHBOARD_RAIN_ALERT_PCT", "90"))
+# CWA's Wx phrase is a multi-hour forecast. Default 101 means probability alone
+# never paints a rain/thunderstorm icon; observed rain still does. Deployments
+# can opt back into forecast-driven icons with an explicit lower threshold.
+RAIN_CONDITION_PCT = int(os.environ.get("DASHBOARD_RAIN_CONDITION_PCT", "101"))
 # Only look at the current hour + this many hours ahead when promoting the card
 # to an imminent-rain alert. A wide window let a lone spike 2-3 h out flip the
 # card to red on afternoons that stayed dry, so keep this tight.
-RAIN_LOOKAHEAD_HOURS = int(os.environ.get("DASHBOARD_RAIN_LOOKAHEAD_HOURS", "1"))
+RAIN_LOOKAHEAD_HOURS = int(os.environ.get("DASHBOARD_RAIN_LOOKAHEAD_HOURS", "0"))
 # A high forecast probability alone over-triggers on dry convective afternoons.
 # Require the model to also expect at least this much rain (mm) in the imminent
-# window before flipping the card to "Rain soon". Set to 0 to disable.
-RAIN_ALERT_PRECIP_MM = float(os.environ.get("DASHBOARD_RAIN_ALERT_PRECIP_MM", "0.2"))
+# window before enabling the amber forecast alert. Set to 0 to remove the
+# minimum-depth requirement.
+RAIN_ALERT_PRECIP_MM = float(os.environ.get("DASHBOARD_RAIN_ALERT_PRECIP_MM", "1.5"))
 AUTO_LOCATION = os.environ.get("DASHBOARD_AUTO_LOCATION", "0").strip().lower() in {"1", "true", "yes", "on"}
 ESP32_ACCESS_LOG = Path(os.environ.get("DASHBOARD_NGINX_ACCESS_LOG", "/var/log/nginx/esp32-dashboard.access.log"))
 GEOLOCATION_URL = os.environ.get(
@@ -556,7 +555,7 @@ def cwa_weather(now: datetime, location: dict | None = None) -> dict:
   # forecast probability is high; otherwise show the phrase's dry sky state.
   allow_precip = is_raining or rain_pct >= RAIN_CONDITION_PCT
   condition, label = cwa_condition_from_text(wx_text, allow_precip)
-  rain_alert = is_raining or rain_pct >= RAIN_ALERT_PCT
+  rain_alert = is_raining
 
   return {
       "city": (location or {}).get("city") or CITY,
@@ -603,7 +602,7 @@ def open_meteo_weather(location: dict | None = None) -> dict:
       "rain_pct": rain_pct,
       "rain_mm": round(rain_mm, 1),
       "is_raining": is_raining,
-      "rain_alert": is_raining or rain_pct >= RAIN_ALERT_PCT,
+      "rain_alert": is_raining,
   }
 
 
@@ -781,11 +780,10 @@ def normalize_weather(weather: dict) -> dict:
   rain_pct = int(safe_float(weather.get("rain_pct")) or 0)
   weather["rain_mm"] = round(rain_mm, 1)
   weather["is_raining"] = bool(weather.get("is_raining") or rain_mm > 0)
-  # Authoritative rain-alert rule: observed rain (red) or a high forecast
-  # probability (amber). A rain/thunderstorm *condition* alone does NOT alert —
-  # it caused false alarms on dry forecasts. Firmware picks red vs amber from
-  # is_raining.
-  weather["rain_alert"] = bool(weather["is_raining"] or rain_pct >= RAIN_ALERT_PCT)
+  # Provider-level probability alone is too coarse to alert. Observed rain is
+  # authoritative here; the hourly overlay below may add a corroborated amber
+  # forecast alert when both probability and expected depth are strong.
+  weather["rain_alert"] = weather["is_raining"]
   return weather
 
 
@@ -1453,9 +1451,9 @@ def apply_near_term_rain_forecast(weather: dict, hourly: list) -> dict:
   """Promote the dashboard rain chance using the current hour + next N hours.
 
   Only the tight imminent window (see RAIN_LOOKAHEAD_HOURS) drives the alert, and
-  a high probability alone is not enough to flip the card to "Rain soon": the
-  model must also expect measurable rain (RAIN_ALERT_PRECIP_MM). Both guards cut
-  the false alarms where a dry convective afternoon still reads high-probability.
+  a high probability alone is not enough: the model must also expect measurable
+  rain (RAIN_ALERT_PRECIP_MM). Forecast alerts never rewrite the main weather
+  condition/icon; those remain grounded in the current provider observation.
   """
   lookahead_count = max(1, RAIN_LOOKAHEAD_HOURS + 1)
   near_term = []
@@ -1477,20 +1475,14 @@ def apply_near_term_rain_forecast(weather: dict, hourly: list) -> dict:
 
   # Probability and expected depth must corroborate each other in the same
   # hour. Taking their independent maxima can combine an 80%/0 mm hour with a
-  # 20%/2 mm hour and create a false alert. Older hourly payloads without any
-  # precip field keep the probability-only fallback.
+  # 20%/2 mm hour and create a false alert. Hourly payloads without expected
+  # precipitation depth cannot corroborate an alert.
   has_precip = any(precip is not None for _, precip in near_points)
-  forecast_alert = (
-      any(rain >= RAIN_ALERT_PCT and precip is not None and precip >= RAIN_ALERT_PRECIP_MM
-          for rain, precip in near_points)
-      if has_precip
-      else imminent_pct >= RAIN_ALERT_PCT
+  forecast_alert = has_precip and any(
+      rain >= RAIN_ALERT_PCT and precip is not None and precip >= RAIN_ALERT_PRECIP_MM
+      for rain, precip in near_points
   )
   weather["rain_alert"] = bool(weather.get("is_raining") or forecast_alert)
-  if forecast_alert:
-    if not weather.get("is_raining") and weather.get("condition") not in {"rain", "thunderstorm"}:
-      weather["condition"] = "rain"
-      weather["label"] = "Rain soon"
   return weather
 
 

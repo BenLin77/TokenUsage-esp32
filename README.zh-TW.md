@@ -290,9 +290,10 @@ curl -fsS http://<your-server-host>/dashboard.json | python3 -m json.tool
 | `CWA_API_KEY` | *(空)* | 可選的台灣 CWA 金鑰；留空則用 open-meteo。 |
 | `DASHBOARD_CWA_LOCATION` / `_STATION` / `_TOWN` | `臺北市` / `臺北` / 空 | CWA 縣市／鄉鎮定位（需金鑰）。 |
 | `DASHBOARD_AUTO_LOCATION` | `0` | `1` = 未設座標時，從裝置 IP 推城市。 |
-| `DASHBOARD_RAIN_ALERT_PCT` | `70` | 觸發降雨警示環的降雨機率 %。 |
-| `DASHBOARD_RAIN_LOOKAHEAD_HOURS` | `1` | 只對未來 N 小時內的降雨示警。 |
-| `DASHBOARD_RAIN_ALERT_PRECIP_MM` | `0.2` | 同一小時需達到的預估雨量，作為警示佐證。 |
+| `DASHBOARD_RAIN_ALERT_PCT` | `90` | 琥珀色預報警示所需的降雨機率 %。 |
+| `DASHBOARD_RAIN_CONDITION_PCT` | `101` | CWA 預報文字可改成雨圖示的機率；`101` 代表只有實測降雨才顯示。 |
+| `DASHBOARD_RAIN_LOOKAHEAD_HOURS` | `0` | 可觸發警示的額外未來小時；`0` 代表只看目前小時。 |
+| `DASHBOARD_RAIN_ALERT_PRECIP_MM` | `1.5` | 同一小時需達到的預估雨量，作為琥珀警示佐證。 |
 | `DASHBOARD_WEATHER_CACHE_TTL` | `90` | 天氣快取秒數。 |
 | `DASH_CLAUDE_5H_LIMIT` / `_WEEKLY_LIMIT` | `50000000` / `100000000` | 計算 Claude 已用 % 的 token 上限。 |
 | `DASH_USD_TWD` | `32.5` | `cost_twd` 用的美元→台幣匯率。 |
@@ -304,9 +305,10 @@ JSON-RPC `account/rateLimits/read` 讀取。舊的 TUI/log 路徑只當 fallback
 
 天氣位置準確度優先使用 server `.env` 的固定座標 `DASHBOARD_LAT` /
 `DASHBOARD_LON`。如果兩者留空，也可以用 `DASHBOARD_AUTO_LOCATION=1` 從
-nginx log 裡最近的 ESP32 requester IP 做城市級定位。主天氣卡片會用目前小時
-加設定範圍內（預設未來 1 小時）的最高降雨機率。警示只在同一個小時同時達到
-機率與預估雨量門檻時觸發，避免把不同時段的尖峰拼成假的「即將降雨」。
+nginx log 裡最近的 ESP32 requester IP 做城市級定位。預設只有目前小時能觸發
+琥珀色預報警示；之後的小時仍會顯示在 hourly 頁面。警示必須在同一小時同時
+達到機率與預估雨量門檻，且不會把主天氣圖示改成正在下雨；缺少預估雨量時也
+不會只靠機率示警。
 
 ## Sources
 
