@@ -183,11 +183,13 @@ touching `board_config.h` or the render target.
   `WEATHER_CACHE_TTL` seconds. Open-Meteo hourly forecast is always used as a
   near-term rain overlay at the selected coordinates: the dashboard `rain_pct`
   is promoted to the max probability in the current hour + next
-  `DASHBOARD_RAIN_LOOKAHEAD_HOURS` hours (default 3). `rain_alert` fires only on
-  observed rain (`rain_mm > 0`, red drop) or forecast `rain_pct >=
-  RAIN_ALERT_PCT` (default 70, amber drop); a rain/thunderstorm condition alone
-  does **not** alert. The base rule is computed in `normalize_weather()`, then
-  near-term forecast is applied by `apply_near_term_rain_forecast()`.
+  `DASHBOARD_RAIN_LOOKAHEAD_HOURS` hours (default 1). `rain_alert` fires only on
+  observed rain (`rain_mm > 0`, red drop) or an hourly point whose probability
+  is at least `RAIN_ALERT_PCT` (default 70) **and whose same-hour expected rain**
+  is at least `RAIN_ALERT_PRECIP_MM` (default 0.2 mm, amber drop). A
+  rain/thunderstorm condition alone does **not** alert. The base rule is
+  computed in `normalize_weather()`, then `apply_near_term_rain_forecast()`
+  replaces it with the corroborated near-term result when hourly data exists.
 - CWA forecast granularity: by default the collector reads the **county** (縣市)
   forecast `F-C0032-001` for `DASHBOARD_CWA_LOCATION`. Set `DASHBOARD_CWA_TOWN`
   (e.g. `中和區`) to instead read the district-accurate **township** (鄉鎮)

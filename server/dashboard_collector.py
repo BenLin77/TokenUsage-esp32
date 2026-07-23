@@ -1459,15 +1459,15 @@ def apply_near_term_rain_forecast(weather: dict, hourly: list) -> dict:
   """
   lookahead_count = max(1, RAIN_LOOKAHEAD_HOURS + 1)
   near_term = []
-  near_precip = []
+  near_points = []
   for point in hourly[:lookahead_count]:
     if isinstance(point, dict):
       value = safe_float(point.get("rain"))
       if value is not None:
-        near_term.append(max(0, min(100, int(value))))
-      precip = safe_float(point.get("precip"))
-      if precip is not None:
-        near_precip.append(max(0.0, precip))
+        rain_pct = max(0, min(100, int(value)))
+        near_term.append(rain_pct)
+        precip = safe_float(point.get("precip"))
+        near_points.append((rain_pct, max(0.0, precip) if precip is not None else None))
   if not near_term:
     return weather
 
@@ -1475,10 +1475,19 @@ def apply_near_term_rain_forecast(weather: dict, hourly: list) -> dict:
   imminent_pct = max(near_term)
   weather["rain_pct"] = max(current_pct, imminent_pct)
 
-  # Fall back to probability-only if the source gave no precip figures.
-  precip_ok = (max(near_precip) >= RAIN_ALERT_PRECIP_MM) if near_precip else True
-  if imminent_pct >= RAIN_ALERT_PCT and precip_ok:
-    weather["rain_alert"] = True
+  # Probability and expected depth must corroborate each other in the same
+  # hour. Taking their independent maxima can combine an 80%/0 mm hour with a
+  # 20%/2 mm hour and create a false alert. Older hourly payloads without any
+  # precip field keep the probability-only fallback.
+  has_precip = any(precip is not None for _, precip in near_points)
+  forecast_alert = (
+      any(rain >= RAIN_ALERT_PCT and precip is not None and precip >= RAIN_ALERT_PRECIP_MM
+          for rain, precip in near_points)
+      if has_precip
+      else imminent_pct >= RAIN_ALERT_PCT
+  )
+  weather["rain_alert"] = bool(weather.get("is_raining") or forecast_alert)
+  if forecast_alert:
     if not weather.get("is_raining") and weather.get("condition") not in {"rain", "thunderstorm"}:
       weather["condition"] = "rain"
       weather["label"] = "Rain soon"

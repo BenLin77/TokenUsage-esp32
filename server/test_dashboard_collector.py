@@ -123,6 +123,92 @@ class CollectorReliabilityTests(unittest.TestCase):
     self.assertEqual("partly_cloudy", weather["condition"])
     self.assertEqual("Partly cloudy", weather["label"])
 
+  def test_near_term_forecast_clears_uncorroborated_provider_alert(self) -> None:
+    weather = collector.normalize_weather({
+        "city": "Zhonghe",
+        "temp_c": 34,
+        "condition": "partly_cloudy",
+        "label": "Partly cloudy",
+        "rain_pct": 75,
+        "rain_mm": 0.0,
+        "is_raining": False,
+        "rain_alert": False,
+    })
+    self.assertTrue(weather["rain_alert"])
+    hourly = [
+        {"t": "14", "temp": 34, "rain": 75, "precip": 0.0},
+        {"t": "15", "temp": 34, "rain": 80, "precip": 0.0},
+    ]
+
+    collector.apply_near_term_rain_forecast(weather, hourly)
+
+    self.assertFalse(weather["rain_alert"])
+    self.assertEqual("partly_cloudy", weather["condition"])
+
+  def test_near_term_forecast_does_not_mix_probability_and_rain_across_hours(self) -> None:
+    weather = {
+        "city": "Zhonghe",
+        "temp_c": 34,
+        "condition": "partly_cloudy",
+        "label": "Partly cloudy",
+        "rain_pct": 20,
+        "rain_mm": 0.0,
+        "is_raining": False,
+        "rain_alert": False,
+    }
+    hourly = [
+        {"t": "14", "temp": 34, "rain": 80, "precip": 0.0},
+        {"t": "15", "temp": 34, "rain": 20, "precip": 2.0},
+    ]
+
+    collector.apply_near_term_rain_forecast(weather, hourly)
+
+    self.assertFalse(weather["rain_alert"])
+    self.assertEqual("partly_cloudy", weather["condition"])
+
+  def test_near_term_forecast_keeps_observed_rain_alert(self) -> None:
+    weather = {
+        "city": "Zhonghe",
+        "temp_c": 29,
+        "condition": "rain",
+        "label": "Rain",
+        "rain_pct": 20,
+        "rain_mm": 0.3,
+        "is_raining": True,
+        "rain_alert": True,
+    }
+    hourly = [
+        {"t": "14", "temp": 29, "rain": 20, "precip": 0.0},
+        {"t": "15", "temp": 29, "rain": 20, "precip": 0.0},
+    ]
+
+    collector.apply_near_term_rain_forecast(weather, hourly)
+
+    self.assertTrue(weather["rain_alert"])
+    self.assertEqual("rain", weather["condition"])
+
+  def test_near_term_forecast_without_precip_field_keeps_probability_fallback(self) -> None:
+    weather = {
+        "city": "Zhonghe",
+        "temp_c": 32,
+        "condition": "partly_cloudy",
+        "label": "Partly cloudy",
+        "rain_pct": 20,
+        "rain_mm": 0.0,
+        "is_raining": False,
+        "rain_alert": False,
+    }
+    hourly = [
+        {"t": "14", "temp": 32, "rain": 75},
+        {"t": "15", "temp": 31, "rain": 80},
+    ]
+
+    collector.apply_near_term_rain_forecast(weather, hourly)
+
+    self.assertTrue(weather["rain_alert"])
+    self.assertEqual("rain", weather["condition"])
+    self.assertEqual("Rain soon", weather["label"])
+
   def test_near_term_forecast_ignores_spike_beyond_imminent_window(self) -> None:
     weather = {
         "city": "Zhonghe",
