@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "board_config.h"
+#include "dashboard_connection_health.h"
 
 #if __has_include("dashboard_config.h")
 #include "dashboard_config.h"
@@ -239,6 +240,7 @@ unsigned long lastFetchMs = 0;
 unsigned long lastRenderMs = 0;
 unsigned long lastReconnectMs = 0;
 unsigned long lastSuccessMs = 0;
+unsigned int consecutiveFetchFailures = 0;
 unsigned long touchStartMs = 0;
 // Advances once per render tick to drive blink/weather animation frames.
 uint8_t animationFrame = 0;
@@ -1348,7 +1350,6 @@ bool readHttpBody(HTTPClient& http, String& payload) {
 bool fetchDashboardState() {
   String url = activeApiUrl();
   if (url.length() == 0 || WiFi.status() != WL_CONNECTED) {
-    state.online = false;
     state.source = "demo";
     Serial.println("Dashboard API disabled or Wi-Fi offline; using demo data");
     return false;
@@ -1357,7 +1358,6 @@ bool fetchDashboardState() {
   HTTPClient http;
   http.setTimeout(5000);
   if (!http.begin(url)) {
-    state.online = false;
     state.source = "http begin failed";
     Serial.println("Dashboard API begin failed");
     return false;
@@ -1365,7 +1365,6 @@ bool fetchDashboardState() {
 
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
-    state.online = false;
     state.source = String("http ") + code;
     Serial.printf("Dashboard API returned HTTP %d\n", code);
     http.end();
@@ -1374,7 +1373,6 @@ bool fetchDashboardState() {
 
   String payload;
   if (!readHttpBody(http, payload)) {
-    state.online = false;
     state.source = "payload too large";
     Serial.println("Dashboard API payload rejected");
     http.end();
@@ -1385,7 +1383,6 @@ bool fetchDashboardState() {
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, payload);
   if (err) {
-    state.online = false;
     state.source = "json error";
     Serial.printf("Dashboard API JSON error: %s\n", err.c_str());
     return false;
@@ -1446,6 +1443,7 @@ bool fetchDashboardState() {
   applyChart(doc["codex"], state.codexChart);
 
   state.online = true;
+  consecutiveFetchFailures = 0;
   state.source = "api";
   lastSuccessMs = millis();
   if (doc["meta"]["source"].is<const char*>()) state.source = boundedText(doc["meta"]["source"].as<const char*>(), MAX_SOURCE_TEXT);
@@ -1518,6 +1516,16 @@ bool refreshDashboardConnectionNow() {
       }
       delay(500);
     }
+  }
+  if (!ok) {
+    if (consecutiveFetchFailures < DASHBOARD_OFFLINE_FAILURE_LIMIT) {
+      consecutiveFetchFailures++;
+    }
+    state.online = dashboardConnectionShouldStayOnline(
+        lastSuccessMs != 0, consecutiveFetchFailures, millis() - lastSuccessMs);
+    Serial.printf("Dashboard refresh failed (%u/%u); %s\n",
+                  consecutiveFetchFailures, DASHBOARD_OFFLINE_FAILURE_LIMIT,
+                  state.online ? "keeping last data" : "offline");
   }
   lastFetchMs = millis();
   lastRenderMs = millis();
