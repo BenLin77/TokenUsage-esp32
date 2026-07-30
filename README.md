@@ -81,7 +81,8 @@ service; everything else is either keyless or a local CLI you already have.
 | What | Needed? | Where to get it | Notes |
 |------|---------|-----------------|-------|
 | Python 3.10+ | required | — | runs `dashboard_collector.py` |
-| Node.js / `npx` | required for Claude usage | nodejs.org | used to run [`ccusage`](https://www.npmjs.com/package/ccusage), which reads your local Claude Code usage |
+| Claude CLI + `tmux`, logged in | required for Claude quota | your Claude install | collector reads the account quota from Claude's `/status` Usage screen |
+| Node.js / `npx` | required for token details | nodejs.org | runs [`ccusage`](https://www.npmjs.com/package/ccusage), which reads only this server's local Claude Code logs |
 | Codex CLI, logged in | required for Codex usage | your Codex install | collector calls `codex app-server --stdio` for live quota |
 | `CWA_API_KEY` | **optional** | [opendata.cwa.gov.tw](https://opendata.cwa.gov.tw/) (free registration) | district-accurate Taiwan rain forecast. Leave blank to fall back to open-meteo |
 
@@ -307,7 +308,8 @@ variables:
 | `DASHBOARD_RAIN_LOOKAHEAD_HOURS` | `0` | Additional future hours allowed to trigger an alert; `0` means current hour only. |
 | `DASHBOARD_RAIN_ALERT_PRECIP_MM` | `1.5` | Same-hour expected rain required to corroborate an amber alert. |
 | `DASHBOARD_WEATHER_CACHE_TTL` | `90` | Weather cache lifetime (seconds). |
-| `DASH_CLAUDE_5H_LIMIT` / `_WEEKLY_LIMIT` | `50000000` / `100000000` | Token limits used to compute Claude % used. |
+| `DASH_CLAUDE_QUOTA_CACHE_TTL` | `900` | Maximum age in seconds for the last successful Claude `/status` read. Expired/missing quota displays as unavailable. |
+| `DASH_CLAUDE_QUOTA_CACHE` | `.claude_quota_cache.json` beside collector | Persistent cache used across one-shot collector runs. |
 | `DASH_USD_TWD` | `32.5` | USD→TWD rate for the `cost_twd` figures. |
 | `DASH_CCUSAGE_NPX_PACKAGE` | `ccusage@20.0.14` | Pinned `ccusage` version run via `npx`. |
 

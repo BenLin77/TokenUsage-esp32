@@ -9,6 +9,7 @@
 /server/.weather_cache.json
 /server/.location_cache.json
 /server/.city_zh_cache.json
+/server/.claude_quota_cache.json
 
 # PlatformIO / Python build artifacts
 .pio/

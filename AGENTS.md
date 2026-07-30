@@ -169,9 +169,13 @@ touching `board_config.h` or the render target.
   missing/auth-blocked windows are emitted as `status: "unavailable"` without
   `used_pct`, while confirmed exhaustion is `used_pct: 100`.
 - **Claude quota** is scraped from the Claude `/status` Usage screen via `tmux`
-  (`claude_usage_from_tui`), `ccusage` fallback. Claude has no equivalent
-  authoritative file, so its reset is whatever Claude itself reports (its 5h
-  block resets at a fixed clock time, not "5h from now").
+  (`claude_usage_from_tui`). A successful read is persisted for
+  `DASH_CLAUDE_QUOTA_CACHE_TTL` seconds (default 900) so an intermittent TUI
+  failure can use a bounded last-known-good value; after that the quota is
+  `status: "unavailable"` without `used_pct`. `ccusage` is only for local token
+  and cost details — never derive account quota percentage from those totals.
+  Claude has no equivalent authoritative file, so its reset is whatever Claude
+  itself reports (its 5h block resets at a fixed clock time, not "5h from now").
 - Reset strings: codex windows are humanized from the reset epoch
   (`humanize_delta`, e.g. `4h7m`, `6d1h`); other sources may return clock/weekday
   strings that `reset_countdown()` rewrites. Humanized strings pass through

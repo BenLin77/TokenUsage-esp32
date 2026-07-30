@@ -58,18 +58,127 @@ class CollectorReliabilityTests(unittest.TestCase):
     self.assertEqual("--", payload["codex"]["weekly"]["reset"])
     self.assertEqual("fallback", payload["meta"]["quota_source"])
 
-  def test_claude_ccusage_without_data_returns_unknown_windows(self) -> None:
+  def test_claude_without_tui_or_cache_returns_unknown_windows(self) -> None:
     now = datetime(2026, 7, 1, 12, 0, tzinfo=collector.TZ)
     week_start = datetime(2026, 6, 29, tzinfo=collector.TZ)
 
-    with patch.object(collector, "claude_usage_from_tui", return_value=None), \
-         patch.object(collector, "ccusage", return_value={}):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      with patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", Path(tmpdir) / "missing.json"), \
+           patch.object(collector, "claude_usage_from_tui", return_value=None), \
+           patch.object(collector, "ccusage", side_effect=AssertionError("quota must not use ccusage")):
+        usage = collector.claude_usage(now, week_start)
+
+    self.assertNotIn("used_pct", usage["h5"])
+    self.assertEqual("unavailable", usage["h5"]["status"])
+    self.assertNotIn("used_pct", usage["weekly"])
+    self.assertEqual("unavailable", usage["weekly"]["status"])
+
+  def test_claude_quota_does_not_derive_percent_from_ccusage_tokens(self) -> None:
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=collector.TZ)
+    week_start = datetime(2026, 6, 29, tzinfo=collector.TZ)
+
+    def fake_ccusage(*args: str) -> dict:
+      if "blocks" in args:
+        return {
+            "blocks": [{
+                "isGap": False,
+                "totalTokens": 5_547_920,
+                "endTime": "2026-07-01T15:42:00+08:00",
+            }]
+        }
+      if "weekly" in args:
+        return {
+            "weekly": [{
+                "week": "2026-06-29",
+                "totalTokens": 109_942_528,
+            }]
+        }
+      raise AssertionError(f"unexpected ccusage arguments: {args}")
+
+    with tempfile.TemporaryDirectory() as tmpdir, \
+         patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", Path(tmpdir) / "missing.json"), \
+         patch.object(collector, "claude_usage_from_tui", return_value=None), \
+         patch.object(collector, "ccusage", fake_ccusage):
       usage = collector.claude_usage(now, week_start)
 
     self.assertNotIn("used_pct", usage["h5"])
     self.assertEqual("unavailable", usage["h5"]["status"])
     self.assertNotIn("used_pct", usage["weekly"])
     self.assertEqual("unavailable", usage["weekly"]["status"])
+
+  def test_claude_quota_uses_only_a_fresh_cached_tui_read(self) -> None:
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=collector.TZ)
+    week_start = datetime(2026, 6, 29, tzinfo=collector.TZ)
+    cached_usage = {
+        "h5": {"used_pct": 14, "reset": "3h"},
+        "weekly": {"used_pct": 62, "reset": "3d"},
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_path = Path(tmpdir) / "claude-quota.json"
+      cache_path.write_text(
+          json.dumps({
+              "captured_at": (now - timedelta(minutes=5)).isoformat(),
+              "usage": cached_usage,
+          }),
+          encoding="utf-8",
+      )
+      with patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", cache_path), \
+           patch.object(collector, "CLAUDE_QUOTA_CACHE_TTL", 900), \
+           patch.object(collector, "claude_usage_from_tui", return_value=None), \
+           patch.object(collector, "ccusage", side_effect=AssertionError("quota must not use ccusage")):
+        usage = collector.claude_usage(now, week_start)
+
+    self.assertEqual(14, usage["h5"]["used_pct"])
+    self.assertEqual("cached", usage["h5"]["status"])
+    self.assertEqual(62, usage["weekly"]["used_pct"])
+    self.assertEqual("cached", usage["weekly"]["status"])
+
+  def test_claude_quota_rejects_an_expired_cached_tui_read(self) -> None:
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=collector.TZ)
+    week_start = datetime(2026, 6, 29, tzinfo=collector.TZ)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_path = Path(tmpdir) / "claude-quota.json"
+      cache_path.write_text(
+          json.dumps({
+              "captured_at": (now - timedelta(minutes=16)).isoformat(),
+              "usage": {
+                  "h5": {"used_pct": 14, "reset": "3h"},
+                  "weekly": {"used_pct": 62, "reset": "3d"},
+              },
+          }),
+          encoding="utf-8",
+      )
+      with patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", cache_path), \
+           patch.object(collector, "CLAUDE_QUOTA_CACHE_TTL", 900), \
+           patch.object(collector, "claude_usage_from_tui", return_value=None), \
+           patch.object(collector, "ccusage", side_effect=AssertionError("quota must not use ccusage")):
+        usage = collector.claude_usage(now, week_start)
+
+    self.assertNotIn("used_pct", usage["h5"])
+    self.assertEqual("unavailable", usage["h5"]["status"])
+    self.assertNotIn("used_pct", usage["weekly"])
+    self.assertEqual("unavailable", usage["weekly"]["status"])
+
+  def test_claude_quota_persists_a_successful_tui_read(self) -> None:
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=collector.TZ)
+    week_start = datetime(2026, 6, 29, tzinfo=collector.TZ)
+    live_usage = {
+        "h5": {"used_pct": 14, "reset": "3h"},
+        "weekly": {"used_pct": 62, "reset": "3d"},
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_path = Path(tmpdir) / "claude-quota.json"
+      with patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", cache_path), \
+           patch.object(collector, "claude_usage_from_tui", return_value=live_usage):
+        usage = collector.claude_usage(now, week_start)
+      cached = json.loads(cache_path.read_text(encoding="utf-8"))
+
+    self.assertEqual(live_usage, usage)
+    self.assertEqual(now.isoformat(), cached["captured_at"])
+    self.assertEqual(live_usage, cached["usage"])
 
   def test_near_term_forecast_promotes_dashboard_rain_alert(self) -> None:
     weather = {

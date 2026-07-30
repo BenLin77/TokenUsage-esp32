@@ -96,8 +96,13 @@ CITY_ZH_CACHE_PATH = Path(
     os.environ.get("DASHBOARD_CITY_ZH_CACHE", str(Path(__file__).resolve().parent / ".city_zh_cache.json"))
 )
 
-CLAUDE_5H_LIMIT = int(os.environ.get("DASH_CLAUDE_5H_LIMIT", "50000000"))
-CLAUDE_WEEKLY_LIMIT = int(os.environ.get("DASH_CLAUDE_WEEKLY_LIMIT", "100000000"))
+CLAUDE_QUOTA_CACHE_PATH = Path(
+    os.environ.get(
+        "DASH_CLAUDE_QUOTA_CACHE",
+        str(Path(__file__).resolve().parent / ".claude_quota_cache.json"),
+    )
+)
+CLAUDE_QUOTA_CACHE_TTL = int(os.environ.get("DASH_CLAUDE_QUOTA_CACHE_TTL", "900"))
 
 # Codex records authoritative rate limits (real used % + reset epoch) into this
 # trace DB on every startup "websocket warmup". Launching the Codex TUI (which
@@ -140,12 +145,6 @@ def parse_instant(value: str) -> datetime:
   return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def pct(tokens: int, limit: int) -> int:
-  if limit <= 0:
-    return 0
-  return max(0, min(100, round((tokens * 100) / limit)))
-
-
 def quota_usage(used_pct: int, reset: str) -> dict:
   return {"used_pct": max(0, min(100, int(used_pct))), "reset": reset}
 
@@ -167,6 +166,13 @@ def quota_known(block: object) -> bool:
 
 def usage_complete(usage: dict) -> bool:
   return all(quota_known(usage.get(window)) for window in ("h5", "weekly"))
+
+
+def usage_live(usage: dict) -> bool:
+  return usage_complete(usage) and all(
+      usage[window].get("status") != "cached"
+      for window in ("h5", "weekly")
+  )
 
 
 def next_monday_label() -> str:
@@ -812,43 +818,74 @@ def compact_tui_reset(value: str) -> str:
   return value or "--"
 
 
+def normalized_claude_quota(usage: object) -> dict | None:
+  if not isinstance(usage, dict) or not usage_complete(usage):
+    return None
+  normalized = {}
+  for window in ("h5", "weekly"):
+    block = usage[window]
+    reset = block.get("reset")
+    normalized[window] = quota_usage(
+        block["used_pct"],
+        reset if isinstance(reset, str) and reset else "--",
+    )
+  return normalized
+
+
+def write_claude_quota_cache(now: datetime, usage: dict) -> None:
+  normalized = normalized_claude_quota(usage)
+  if normalized is None:
+    return
+  try:
+    atomic_write_json(
+        CLAUDE_QUOTA_CACHE_PATH,
+        {"captured_at": now.isoformat(), "usage": normalized},
+    )
+  except OSError as exc:
+    print(f"claude quota cache write failed: {exc}", file=sys.stderr)
+
+
+def read_claude_quota_cache(now: datetime) -> dict | None:
+  if CLAUDE_QUOTA_CACHE_TTL <= 0:
+    return None
+  try:
+    payload = json.loads(CLAUDE_QUOTA_CACHE_PATH.read_text(encoding="utf-8"))
+    captured_at = parse_instant(payload["captured_at"])
+    if captured_at.tzinfo is None:
+      captured_at = captured_at.replace(tzinfo=TZ)
+    age_seconds = (
+        now.astimezone(timezone.utc) - captured_at.astimezone(timezone.utc)
+    ).total_seconds()
+    if age_seconds < 0 or age_seconds > CLAUDE_QUOTA_CACHE_TTL:
+      return None
+    usage = normalized_claude_quota(payload.get("usage"))
+    if usage is None:
+      return None
+  except FileNotFoundError:
+    return None
+  except (OSError, KeyError, TypeError, ValueError) as exc:
+    print(f"claude quota cache read failed: {exc}", file=sys.stderr)
+    return None
+
+  for block in usage.values():
+    block["status"] = "cached"
+  return usage
+
+
 def claude_usage(now: datetime, week_start: datetime) -> dict:
-  tui_usage = claude_usage_from_tui()
-  if tui_usage:
+  del week_start  # Kept in the shared usage-provider signature.
+  tui_usage = normalized_claude_quota(claude_usage_from_tui())
+  if tui_usage is not None:
+    write_claude_quota_cache(now, tui_usage)
     return tui_usage
 
-  h5 = unavailable_quota()
-  active = ccusage("claude", "blocks", "--active", "--json", "--timezone", TZ_NAME, "--offline")
-  for block in active.get("blocks", []):
-    if not block.get("isGap"):
-      h5_tokens = int(block.get("totalTokens") or 0)
-      h5 = quota_usage(pct(h5_tokens, CLAUDE_5H_LIMIT), time_label(block.get("endTime")))
-      break
+  cached_usage = read_claude_quota_cache(now)
+  if cached_usage is not None:
+    return cached_usage
 
-  weekly_usage = unavailable_quota()
-  weekly = ccusage(
-      "claude",
-      "weekly",
-      "--json",
-      "--timezone",
-      TZ_NAME,
-      "--offline",
-      "-w",
-      "monday",
-      "--since",
-      week_start.strftime("%Y%m%d"),
-  )
-  week_key = week_start.date().isoformat()
-  for item in weekly.get("weekly", []):
-    if item.get("week") == week_key:
-      week_tokens = int(item.get("totalTokens") or 0)
-      weekly_usage = quota_usage(pct(week_tokens, CLAUDE_WEEKLY_LIMIT), next_monday_label())
-      break
-
-  return {
-      "h5": h5,
-      "weekly": weekly_usage,
-  }
+  # ccusage only knows token totals from local log files. Those totals are not
+  # account quota and must never be divided by a guessed token "limit".
+  return unknown_usage()
 
 
 def claude_usage_from_tui() -> dict | None:
@@ -1391,7 +1428,7 @@ def empty_detail() -> dict:
 def safe_usage(name: str, fn, now: datetime, week_start: datetime) -> tuple[dict, bool]:
   try:
     usage = fn(now, week_start)
-    return usage, usage_complete(usage)
+    return usage, usage_live(usage)
   except Exception as exc:
     print(f"{name} usage unavailable: {exc}", file=sys.stderr)
     return empty_usage(), False
