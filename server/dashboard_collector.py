@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def load_dotenv(path: Path) -> None:
@@ -103,6 +103,9 @@ CLAUDE_QUOTA_CACHE_PATH = Path(
     )
 )
 CLAUDE_QUOTA_CACHE_TTL = int(os.environ.get("DASH_CLAUDE_QUOTA_CACHE_TTL", "900"))
+# Launching the Claude TUI costs ~30 s of CPU, so a cached read younger than this
+# is served as live instead of re-scraping every collector run.
+CLAUDE_QUOTA_REFRESH = int(os.environ.get("DASH_CLAUDE_QUOTA_REFRESH", "300"))
 
 # Codex records authoritative rate limits (real used % + reset epoch) into this
 # trace DB on every startup "websocket warmup". Launching the Codex TUI (which
@@ -153,10 +156,10 @@ def unavailable_quota(reset: str = "--", status: str = "unavailable") -> dict:
   return {"reset": reset, "status": status}
 
 
-def unknown_usage() -> dict:
+def unknown_usage(status: str = "unavailable") -> dict:
   return {
-      "h5": unavailable_quota(),
-      "weekly": unavailable_quota(),
+      "h5": unavailable_quota(status=status),
+      "weekly": unavailable_quota(status=status),
   }
 
 
@@ -806,16 +809,31 @@ def fallback_weather() -> dict:
   }
 
 
-def compact_tui_reset(value: str) -> str:
-  # Strip the trailing timezone note, e.g. "Jul 3, 4:59pm (Asia/Taipei)".
-  value = re.sub(r"\s*\(.*?\)\s*$", "", value.strip())
-  # The weekly line is "Mon D, H:MMam" — keep the time. Only drop the part after
-  # the comma when it is a bare year ("Mon D, YYYY").
+def compact_tui_reset(value: str, now: datetime) -> str:
+  """Rewrite a Claude TUI reset ("7:20am (UTC)", "Sep 18, 9am (UTC)") as a
+  "Mon D, H:MMam" moment in TZ. The TUI prints its host's zone, which is not
+  necessarily TZ, so the trailing zone note must be honoured, not dropped."""
+  value = value.strip()
+  zone = TZ
+  note = re.search(r"\s*\(([^)]*)\)\s*$", value)
+  if note:
+    value = value[:note.start()].strip()
+    try:
+      zone = ZoneInfo(note.group(1).strip())
+    except (ZoneInfoNotFoundError, ValueError):
+      zone = TZ
+  # Only drop the part after the comma when it is a bare year ("Mon D, YYYY").
   if "," in value:
     head, tail = (chunk.strip() for chunk in value.split(",", 1))
     if re.fullmatch(r"\d{4}", tail):
       return head
-  return value or "--"
+  local_now = now.astimezone(zone)
+  target = parse_datetime_target(value, local_now) or parse_clock_target(value, local_now)
+  if target is None:
+    return value or "--"
+  target = target.astimezone(TZ)
+  clock = f"{target.hour % 12 or 12}:{target.minute:02d}{'am' if target.hour < 12 else 'pm'}"
+  return f"{target.strftime('%b')} {target.day}, {clock}"
 
 
 def normalized_claude_quota(usage: object) -> dict | None:
@@ -845,8 +863,8 @@ def write_claude_quota_cache(now: datetime, usage: dict) -> None:
     print(f"claude quota cache write failed: {exc}", file=sys.stderr)
 
 
-def read_claude_quota_cache(now: datetime) -> dict | None:
-  if CLAUDE_QUOTA_CACHE_TTL <= 0:
+def read_claude_quota_cache(now: datetime, max_age: int) -> dict | None:
+  if max_age <= 0:
     return None
   try:
     payload = json.loads(CLAUDE_QUOTA_CACHE_PATH.read_text(encoding="utf-8"))
@@ -856,39 +874,44 @@ def read_claude_quota_cache(now: datetime) -> dict | None:
     age_seconds = (
         now.astimezone(timezone.utc) - captured_at.astimezone(timezone.utc)
     ).total_seconds()
-    if age_seconds < 0 or age_seconds > CLAUDE_QUOTA_CACHE_TTL:
+    if age_seconds < 0 or age_seconds > max_age:
       return None
-    usage = normalized_claude_quota(payload.get("usage"))
-    if usage is None:
-      return None
+    return normalized_claude_quota(payload.get("usage"))
   except FileNotFoundError:
     return None
   except (OSError, KeyError, TypeError, ValueError) as exc:
     print(f"claude quota cache read failed: {exc}", file=sys.stderr)
     return None
 
-  for block in usage.values():
-    block["status"] = "cached"
-  return usage
-
 
 def claude_usage(now: datetime, week_start: datetime) -> dict:
   del week_start  # Kept in the shared usage-provider signature.
-  tui_usage = normalized_claude_quota(claude_usage_from_tui())
+  recent_usage = read_claude_quota_cache(now, CLAUDE_QUOTA_REFRESH)
+  if recent_usage is not None:
+    return recent_usage
+
+  result = claude_usage_from_tui(now)
+  tui_usage = normalized_claude_quota(result)
   if tui_usage is not None:
     write_claude_quota_cache(now, tui_usage)
     return tui_usage
 
-  cached_usage = read_claude_quota_cache(now)
+  reason = result if isinstance(result, str) else "unavailable"
+  print(f"claude quota TUI read failed: {reason}", file=sys.stderr)
+  cached_usage = read_claude_quota_cache(now, CLAUDE_QUOTA_CACHE_TTL)
   if cached_usage is not None:
+    for block in cached_usage.values():
+      block["status"] = "cached"
     return cached_usage
 
   # ccusage only knows token totals from local log files. Those totals are not
   # account quota and must never be divided by a guessed token "limit".
-  return unknown_usage()
+  return unknown_usage(reason)
 
 
-def claude_usage_from_tui() -> dict | None:
+def claude_usage_from_tui(now: datetime) -> dict | str:
+  """Scrape the Claude /status Usage screen. Returns the quota dict, or a
+  failure reason: "tui_failed", "not_logged_in" or "parse_failed"."""
   session = f"esp32_claude_usage_{os.getpid()}_{int(time.time())}"
   workdir = Path.home() / "code" / "esp32-dashboard" / "claude-usage-workdir"
   captures: list[str] = []
@@ -934,32 +957,38 @@ def claude_usage_from_tui() -> dict | None:
           ).stdout
       )
   except Exception:
-    return None
+    return "tui_failed"
   finally:
     subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
-  capture = "\n".join(captures)
+  return parse_claude_status("\n".join(captures), now)
+
+
+def parse_claude_status(capture: str, now: datetime) -> dict | str:
+  if re.search(r"Not logged in", capture, re.IGNORECASE):
+    return "not_logged_in"
+  # The reset line keeps its "(Zone)" note so compact_tui_reset can convert it.
   session_match = re.search(
-      r"Current session\s+(\d+)%\s+\d+%\s+used\s+Resets\s+([^\n(]+)",
+      r"Current session\s+(\d+)%\s+\d+%\s+used\s+Resets\s+([^\n]+)",
       capture,
       re.IGNORECASE,
   )
   week_match = re.search(
-      r"Current week[^\n]*\s+(\d+)%\s+\d+%\s+used\s+Resets\s+([^\n(]+)",
+      r"Current week[^\n]*\s+(\d+)%\s+\d+%\s+used\s+Resets\s+([^\n]+)",
       capture,
       re.IGNORECASE,
   )
   if not session_match or not week_match:
-    return None
+    return "parse_failed"
 
   return {
       "h5": {
           "used_pct": max(0, min(100, int(session_match.group(1)))),
-          "reset": compact_tui_reset(session_match.group(2)),
+          "reset": compact_tui_reset(session_match.group(2), now),
       },
       "weekly": {
           "used_pct": max(0, min(100, int(week_match.group(1)))),
-          "reset": compact_tui_reset(week_match.group(2)),
+          "reset": compact_tui_reset(week_match.group(2), now),
       },
   }
 
@@ -1603,11 +1632,18 @@ def build_dashboard() -> dict:
 
 def atomic_write_json(path: Path, payload: dict) -> None:
   path.parent.mkdir(parents=True, exist_ok=True)
-  with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as temp:
-    json.dump(payload, temp, ensure_ascii=True, separators=(",", ":"))
-    temp.write("\n")
-    temp_path = Path(temp.name)
-  temp_path.replace(path)
+  temp_path: Path | None = None
+  try:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as temp:
+      temp_path = Path(temp.name)
+      json.dump(payload, temp, ensure_ascii=True, separators=(",", ":"))
+      temp.write("\n")
+    temp_path.replace(path)
+  except BaseException:
+    # delete=False means a failed write would otherwise leave a stray tmp* file.
+    if temp_path is not None:
+      temp_path.unlink(missing_ok=True)
+    raise
   path.chmod(0o644)
 
 

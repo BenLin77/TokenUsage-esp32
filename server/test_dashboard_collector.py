@@ -64,14 +64,37 @@ class CollectorReliabilityTests(unittest.TestCase):
 
     with tempfile.TemporaryDirectory() as tmpdir:
       with patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", Path(tmpdir) / "missing.json"), \
-           patch.object(collector, "claude_usage_from_tui", return_value=None), \
+           patch.object(collector, "claude_usage_from_tui", return_value="not_logged_in"), \
            patch.object(collector, "ccusage", side_effect=AssertionError("quota must not use ccusage")):
         usage = collector.claude_usage(now, week_start)
 
+    # The failure reason is surfaced so a logged-out host is diagnosable.
     self.assertNotIn("used_pct", usage["h5"])
-    self.assertEqual("unavailable", usage["h5"]["status"])
+    self.assertEqual("not_logged_in", usage["h5"]["status"])
     self.assertNotIn("used_pct", usage["weekly"])
-    self.assertEqual("unavailable", usage["weekly"]["status"])
+    self.assertEqual("not_logged_in", usage["weekly"]["status"])
+
+  def test_claude_quota_serves_a_recent_read_without_launching_the_tui(self) -> None:
+    now = datetime(2026, 7, 1, 12, 0, tzinfo=collector.TZ)
+    week_start = datetime(2026, 6, 29, tzinfo=collector.TZ)
+    cached_usage = {
+        "h5": {"used_pct": 14, "reset": "Jul 1, 3:20pm"},
+        "weekly": {"used_pct": 62, "reset": "Jul 3, 5:00pm"},
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_path = Path(tmpdir) / "claude-quota.json"
+      cache_path.write_text(
+          json.dumps({"captured_at": (now - timedelta(minutes=2)).isoformat(), "usage": cached_usage}),
+          encoding="utf-8",
+      )
+      with patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", cache_path), \
+           patch.object(collector, "CLAUDE_QUOTA_REFRESH", 300), \
+           patch.object(collector, "claude_usage_from_tui", side_effect=AssertionError("TUI must not launch")):
+        usage = collector.claude_usage(now, week_start)
+
+    self.assertEqual(cached_usage, usage)
+    self.assertTrue(collector.usage_live(usage))
 
   def test_claude_quota_does_not_derive_percent_from_ccusage_tokens(self) -> None:
     now = datetime(2026, 7, 1, 12, 0, tzinfo=collector.TZ)
@@ -118,12 +141,13 @@ class CollectorReliabilityTests(unittest.TestCase):
       cache_path = Path(tmpdir) / "claude-quota.json"
       cache_path.write_text(
           json.dumps({
-              "captured_at": (now - timedelta(minutes=5)).isoformat(),
+              "captured_at": (now - timedelta(minutes=10)).isoformat(),
               "usage": cached_usage,
           }),
           encoding="utf-8",
       )
       with patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", cache_path), \
+           patch.object(collector, "CLAUDE_QUOTA_REFRESH", 300), \
            patch.object(collector, "CLAUDE_QUOTA_CACHE_TTL", 900), \
            patch.object(collector, "claude_usage_from_tui", return_value=None), \
            patch.object(collector, "ccusage", side_effect=AssertionError("quota must not use ccusage")):
@@ -758,15 +782,43 @@ class CollectorReliabilityTests(unittest.TestCase):
     # The real weekly TUI line is "Resets Jul 3, 4:59pm (Asia/Taipei)". The time
     # must survive compaction so a same-day reset shows real hours, not "soon".
     now = datetime(2026, 7, 3, 9, 15, tzinfo=collector.TZ)
-    compact = collector.compact_tui_reset("Jul 3, 4:59pm (Asia/Taipei)")
+    compact = collector.compact_tui_reset("Jul 3, 4:59pm (Asia/Taipei)", now)
     self.assertEqual("Jul 3, 4:59pm", compact)
     self.assertEqual("7h44m", collector.reset_countdown(compact, now))
     # Next-week resets and the session clock line still work.
     self.assertEqual("7d7h", collector.reset_countdown("Jul 10, 4:59pm", now))
     self.assertEqual("1h54m", collector.reset_countdown(
-        collector.compact_tui_reset("11:09am (Asia/Taipei)"), now))
+        collector.compact_tui_reset("11:09am (Asia/Taipei)", now), now))
     # A yearful form still drops the year (falls back to a bare date).
-    self.assertEqual("Jul 3", collector.compact_tui_reset("Jul 3, 2026"))
+    self.assertEqual("Jul 3", collector.compact_tui_reset("Jul 3, 2026", now))
+
+  def test_claude_status_on_a_utc_host_converts_resets_to_dashboard_tz(self) -> None:
+    # Real node5 capture (system TZ UTC) at 03:10 UTC = 11:10 Taipei. Dropping
+    # "(UTC)" and reading 7:20am as Taipei time reported the 5h reset as ~20h.
+    now = datetime(2026, 9, 14, 11, 10, tzinfo=collector.TZ)
+    capture = (
+        "Current session\n31% 31% used\nResets 7:20am (UTC)\n"
+        "Current week (all models)\n16% 16% used\nResets Sep 18, 9am (UTC)\n"
+    )
+    usage = collector.parse_claude_status(capture, now)
+
+    self.assertEqual({"used_pct": 31, "reset": "Sep 14, 3:20pm"}, usage["h5"])
+    self.assertEqual({"used_pct": 16, "reset": "Sep 18, 5:00pm"}, usage["weekly"])
+    self.assertEqual("4h10m", collector.reset_countdown(usage["h5"]["reset"], now))
+    self.assertEqual("4d5h", collector.reset_countdown(usage["weekly"]["reset"], now))
+
+  def test_claude_status_reports_why_a_read_failed(self) -> None:
+    now = datetime(2026, 9, 14, 11, 10, tzinfo=collector.TZ)
+    self.assertEqual("not_logged_in", collector.parse_claude_status("Not logged in · Run /login\n", now))
+    self.assertEqual("parse_failed", collector.parse_claude_status("1. Auto-compact: true\n", now))
+
+  def test_atomic_write_json_removes_temp_file_on_failure(self) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+      target = Path(tmpdir) / "dashboard.json"
+      with patch.object(collector.json, "dump", side_effect=RuntimeError("disk full")):
+        with self.assertRaises(RuntimeError):
+          collector.atomic_write_json(target, {"ok": True})
+      self.assertEqual([], list(Path(tmpdir).iterdir()))
 
 
 if __name__ == "__main__":
