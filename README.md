@@ -151,7 +151,7 @@ The default JSON URL is:
 http://<your-server-host>/dashboard.json
 ```
 
-If Wi-Fi is not configured, the device stays in demo mode. The on-device Wi-Fi flow changes the SSID/password; the dashboard JSON URL comes from the compile-time/local setting in `firmware/src/dashboard_config.h`.
+If Wi-Fi is not configured, the device stays in demo mode. The on-device Wi-Fi flow changes the SSID/password. To change the dashboard server without reflashing, tap **Server** in Settings and type the server IP or host (e.g. `192.168.1.20`, which becomes `http://192.168.1.20/dashboard.json`; input containing `://` is used as a full URL; OK on an empty field keeps the current URL). A URL saved on the device (including by the Wi-Fi flow) overrides `DASHBOARD_API_URL` in `firmware/src/dashboard_config.h`, so reflashing alone does not change it — use **Server**, or erase flash (`pio run -d firmware -t erase`) before uploading.
 
 ### `firmware/src/dashboard_config.h`
 
@@ -170,7 +170,6 @@ Optional overrides (uncomment in your copy to change; defaults shown in the exam
 
 - `DASHBOARD_CLOCK_TZ` - POSIX timezone for the on-device clock (default `CST-8`, i.e. Taipei UTC+8). **Set this if you are not in Taiwan** - e.g. `JST-9`, `EST5EDT,M3.2.0,M11.1.0`.
 - `DASHBOARD_NTP_1`, `DASHBOARD_NTP_2` - NTP servers for time sync.
-- `DASHBOARD_SETUP_AP_SSID`, `DASHBOARD_SETUP_AP_PASSWORD` - the first-boot setup hotspot (password must be >= 8 chars).
 
 The on-device UI language (English / 繁體中文), theme, and brightness are chosen
 at runtime in Settings and persisted in NVS, so they are not part of this file.
@@ -263,7 +262,7 @@ This workspace also has PlatformIO installed locally in `.venv`, so these work h
 .venv/bin/pio run -d firmware -t upload
 ```
 
-The project defaults to `/dev/ttyACM0`, which matched the connected ESP32-S3 USB JTAG/serial device in this workspace.
+No upload/monitor port is pinned; PlatformIO auto-detects the board on either USB port (native USB `ttyACM*` or the CH340 UART `ttyUSB*`). Serial logs use USB CDC, so `pio device monitor` shows them only on the native USB port.
 
 ## Server Collector
 
@@ -275,8 +274,8 @@ http://<your-server-host>/dashboard.json
 
 Installed files on the server (paths are examples — adjust to your host):
 
-- `/opt/esp32-dashboard/dashboard_collector.py`
-- `/opt/esp32-dashboard/.env` (copied from `.env.example`; git-ignored)
+- `/home/<user>/code/esp32-dashboard/dashboard_collector.py`
+- `/home/<user>/code/esp32-dashboard/.env` (copied from `.env.example`; git-ignored)
 - `/etc/systemd/system/esp32-dashboard.service`
 - `/etc/systemd/system/esp32-dashboard.timer`
 - `/etc/nginx/sites-available/esp32-dashboard`

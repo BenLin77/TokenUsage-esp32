@@ -1,9 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <DNSServer.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
-#include <WebServer.h>
 #include <WiFi.h>
 #include <Wire.h>
 #include <time.h>
@@ -70,21 +68,6 @@ void applyTheme(Theme t) {
   }
 }
 
-static constexpr uint16_t SETUP_DNS_PORT = 53;
-// Config-overridable defaults: dashboard_config.h may #define these to localise
-// the build; otherwise the values below apply. See dashboard_config.example.h.
-#ifndef DASHBOARD_SETUP_AP_SSID
-#define DASHBOARD_SETUP_AP_SSID "ESP32-Dashboard-Setup"
-#endif
-#ifndef DASHBOARD_SETUP_AP_PASSWORD
-#define DASHBOARD_SETUP_AP_PASSWORD "esp32setup"
-#endif
-static constexpr const char* SETUP_AP_SSID = DASHBOARD_SETUP_AP_SSID;
-static constexpr const char* SETUP_AP_PASSWORD = DASHBOARD_SETUP_AP_PASSWORD;
-static constexpr int SETUP_BACK_X = 34;
-static constexpr int SETUP_BACK_Y = 354;
-static constexpr int SETUP_BACK_W = 118;
-static constexpr int SETUP_BACK_H = 42;
 static constexpr unsigned long LONG_PRESS_MS = 1200;
 // Redraw cadence for the live clock and gentle icon animation. The dashboard is
 // double-buffered through a PSRAM sprite, so a full repaint at this rate is
@@ -231,8 +214,6 @@ void resetUiBigFont() {
 
 DashboardState state;
 Preferences preferences;
-WebServer setupServer(80);
-DNSServer dnsServer;
 String runtimeWifiSsid;
 String runtimeWifiPassword;
 String runtimeApiUrl;
@@ -246,14 +227,13 @@ unsigned long touchStartMs = 0;
 uint8_t animationFrame = 0;
 uint8_t currentBrightness = BRIGHTNESS_DAY;
 bool timeSynced = false;
-bool setupMode = false;
 bool touchWasDown = false;
 bool longPressFired = false;
 uint16_t lastTouchX = 0;
 uint16_t lastTouchY = 0;
 
-// Which touch page is showing. The legacy AP portal is still handled separately
-// via setupMode; WifiScan/WifiKey are the on-device Wi-Fi entry flow.
+// Which touch page is showing. WifiScan/WifiKey are the on-device Wi-Fi entry
+// flow; WifiKey also edits the dashboard server URL (kbEditingUrl).
 enum class View {
   Dashboard, DetailCodex, DetailClaude, Weather, Settings, WifiScan, WifiKey,
   Calculator, Pomodoro, Stopwatch, Timer, SysInfo
@@ -305,8 +285,12 @@ String wifiSsids[WIFI_SCAN_MAX];
 int wifiSsidCount = 0;
 String inputSsid;
 String inputPassword;
+String inputUrl;
+bool kbEditingUrl = false;  // keyboard target: dashboard URL instead of Wi-Fi password
 bool kbShift = false;
 bool kbSymbols = false;
+
+String& kbText() { return kbEditingUrl ? inputUrl : inputPassword; }
 
 // User-adjustable, persisted in NVS.
 uint8_t dayBrightness = BRIGHTNESS_DAY;  // base brightness (settings -/+)
@@ -376,15 +360,6 @@ void drawSmokeFrame(size_t index) {
   present();
 }
 #endif
-
-String htmlEscape(const String& value) {
-  String escaped = value;
-  escaped.replace("&", "&amp;");
-  escaped.replace("<", "&lt;");
-  escaped.replace(">", "&gt;");
-  escaped.replace("\"", "&quot;");
-  return escaped;
-}
 
 void loadSettings() {
   preferences.begin("dashboard", false);
@@ -550,62 +525,6 @@ void drawWifiIcon(int cx, int y, bool connected) {
     gfx->drawLine(cx - 12, y, cx + 11, y + 18, COLOR_DANGER);
     gfx->drawLine(cx - 11, y, cx + 12, y + 18, COLOR_DANGER);
   }
-}
-
-void drawSetupBackButton(bool pressed = false) {
-  uint32_t bg = pressed ? COLOR_CODEX : COLOR_PANEL_2;
-  uint32_t fg = pressed ? COLOR_BG : COLOR_TEXT;
-  gfx->fillRoundRect(SETUP_BACK_X, SETUP_BACK_Y, SETUP_BACK_W, SETUP_BACK_H, 8, bg);
-  gfx->drawRoundRect(SETUP_BACK_X, SETUP_BACK_Y, SETUP_BACK_W, SETUP_BACK_H, 8, COLOR_RULE);
-  gfx->setTextColor(fg, bg);
-  gfx->setTextSize(2);
-  gfx->setCursor(SETUP_BACK_X + 31, SETUP_BACK_Y + 13);
-  gfx->print("Back");
-  present();
-}
-
-void drawSetupScreen() {
-  gfx->fillScreen(COLOR_BG);
-  drawPanel(12, 28, 296, 390);
-
-  gfx->setTextColor(COLOR_TEXT, COLOR_PANEL);
-  gfx->setTextSize(2);
-  gfx->setCursor(34, 54);
-  gfx->print("Wi-Fi Setup");
-
-  gfx->setTextColor(COLOR_MUTED, COLOR_PANEL);
-  gfx->setTextSize(1);
-  gfx->setCursor(34, 94);
-  gfx->print("Connect to this AP");
-
-  gfx->setTextColor(COLOR_CODEX, COLOR_PANEL);
-  gfx->setTextSize(2);
-  gfx->setCursor(34, 118);
-  gfx->print("ESP32-Dashboard-");
-  gfx->setCursor(34, 144);
-  gfx->print("Setup");
-
-  gfx->setTextColor(COLOR_MUTED, COLOR_PANEL);
-  gfx->setTextSize(1);
-  gfx->setCursor(34, 184);
-  gfx->print("Password");
-  gfx->setTextColor(COLOR_TEXT, COLOR_PANEL);
-  gfx->setCursor(34, 204);
-  gfx->print(SETUP_AP_PASSWORD);
-
-  gfx->setTextColor(COLOR_MUTED, COLOR_PANEL);
-  gfx->setCursor(34, 246);
-  gfx->print("Open in browser");
-  gfx->setTextColor(COLOR_TEXT, COLOR_PANEL);
-  gfx->setTextSize(2);
-  gfx->setCursor(34, 270);
-  gfx->print("192.168.4.1");
-
-  gfx->setTextColor(COLOR_MUTED, COLOR_PANEL);
-  gfx->setTextSize(1);
-  gfx->setCursor(34, 330);
-  gfx->print("Tap Back to cancel");
-  drawSetupBackButton(false);
 }
 
 void drawSun(int cx, int cy, int r) {
@@ -1097,125 +1016,12 @@ void drawDashboard() {
   present();
 }
 
-void returnToDashboardFromSetup();
-
-void handleSetupRoot() {
-  String html = F(
-      "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-      "<title>ESP32 Dashboard Setup</title>"
-      "<style>"
-      "body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#101215;color:#f3f6fa}"
-      "main{max-width:520px;margin:0 auto;padding:24px}"
-      "h1{font-size:24px;margin:0 0 18px}"
-      "label{display:block;margin:14px 0 6px;color:#94a3b8}"
-      "input{box-sizing:border-box;width:100%;font-size:16px;padding:12px;border:1px solid #323a45;border-radius:8px;background:#1c2128;color:#f3f6fa}"
-      "button{width:100%;margin-top:22px;padding:13px;border:0;border-radius:8px;background:#38bdf8;color:#071014;font-size:17px;font-weight:700}"
-      "button.secondary{background:#242b33;color:#f3f6fa;border:1px solid #323a45}"
-      "p{color:#94a3b8;line-height:1.45}"
-      "</style></head><body><main><h1>ESP32 Dashboard Setup</h1>"
-      "<p>Save Wi-Fi and JSON endpoint. The device reboots after saving.</p>"
-      "<form method=\"post\" action=\"/save\">");
-  html += F("<label>Wi-Fi SSID</label><input name=\"ssid\" required value=\"");
-  html += htmlEscape(runtimeWifiSsid);
-  html += F("\"><label>Wi-Fi password</label><input name=\"pass\" type=\"password\" placeholder=\"Leave blank to keep current\">");
-  html += F("<label>Dashboard JSON URL</label><input name=\"api\" placeholder=\"http://your-server-host/dashboard.json\" value=\"");
-  html += htmlEscape(runtimeApiUrl);
-  html += F("\"><button type=\"submit\">Save and reboot</button></form>"
-            "<form method=\"post\" action=\"/cancel\"><button class=\"secondary\" type=\"submit\">Back to dashboard</button></form>"
-            "</main></body></html>");
-  setupServer.send(200, "text/html", html);
-}
-
-void handleSetupSave() {
-  String ssid = setupServer.arg("ssid");
-  String password = setupServer.arg("pass");
-  String apiUrl = setupServer.arg("api");
-  ssid.trim();
-  apiUrl.trim();
-  if (password.length() == 0) password = runtimeWifiPassword;
-
-  saveSettings(ssid, password, apiUrl);
-  runtimeWifiSsid = ssid;
-  runtimeWifiPassword = password;
-  runtimeApiUrl = apiUrl;
-
-  setupServer.send(200, "text/html",
-                   "<!doctype html><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-                   "<body style=\"font-family:system-ui;background:#101215;color:#f3f6fa;padding:24px\">"
-                   "<h1>Saved</h1><p>ESP32 is rebooting.</p></body>");
-  Serial.println("Settings saved; rebooting");
-  delay(900);
-  ESP.restart();
-}
-
-void handleSetupCancel() {
-  setupServer.send(200, "text/html",
-                   "<!doctype html><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-                   "<body style=\"font-family:system-ui;background:#101215;color:#f3f6fa;padding:24px\">"
-                   "<h1>Returning</h1><p>Going back to the dashboard.</p></body>");
-  delay(250);
-  returnToDashboardFromSetup();
-}
-
-void handleSetupNotFound() {
-  setupServer.sendHeader("Location", "/", true);
-  setupServer.send(302, "text/plain", "");
-}
-
-void startWifiSetupPortal() {
-  if (setupMode) return;
-
-  setupMode = true;
-  state.online = false;
-  state.source = "setup";
-  Serial.println("Starting Wi-Fi setup portal");
-  drawSetupScreen();
-
-  WiFi.disconnect(false, false);
-  WiFi.mode(WIFI_AP);
-  bool apOk = WiFi.softAP(SETUP_AP_SSID, SETUP_AP_PASSWORD);
-  IPAddress apIp = WiFi.softAPIP();
-  dnsServer.start(SETUP_DNS_PORT, "*", apIp);
-
-  setupServer.on("/", HTTP_GET, handleSetupRoot);
-  setupServer.on("/save", HTTP_POST, handleSetupSave);
-  setupServer.on("/cancel", HTTP_POST, handleSetupCancel);
-  setupServer.onNotFound(handleSetupNotFound);
-  setupServer.begin();
-
-  Serial.printf("Setup AP: %s (%s), http://%s, start=%s\n", SETUP_AP_SSID, SETUP_AP_PASSWORD,
-                apIp.toString().c_str(), apOk ? "ok" : "failed");
-}
-
-void handleSetupTouch() {
-  if (!lcd.touch()) return;
-
-  uint16_t x = 0;
-  uint16_t y = 0;
-  bool touching = lcd.getTouch(&x, &y);
-
-  if (!touching) {
-    touchWasDown = false;
-    return;
-  }
-
-  if (touchWasDown) return;
-  touchWasDown = true;
-
-  if (pointInRect(x, y, SETUP_BACK_X, SETUP_BACK_Y, SETUP_BACK_W, SETUP_BACK_H)) {
-    Serial.printf("Setup back tapped at x=%u y=%u\n", x, y);
-    drawSetupBackButton(true);
-    delay(120);
-    returnToDashboardFromSetup();
-  }
-}
-
 // Defined further down (after the data/render helpers they depend on).
 void handleTap(uint16_t x, uint16_t y);
 void handleLongPress();
 
 void handleTouch() {
-  if (setupMode || !lcd.touch()) return;
+  if (!lcd.touch()) return;
 
   uint16_t x = 0;
   uint16_t y = 0;
@@ -1547,36 +1353,6 @@ void applyAutoBrightness() {
   }
 }
 
-void returnToDashboardFromSetup() {
-  if (!setupMode) return;
-
-  Serial.println("Leaving Wi-Fi setup portal");
-  setupMode = false;
-  touchWasDown = false;
-  longPressFired = false;
-
-  setupServer.stop();
-  dnsServer.stop();
-  WiFi.softAPdisconnect(true);
-  WiFi.disconnect(false, false);
-
-  gfx->fillScreen(COLOR_BG);
-  drawPanel(32, 166, 256, 126);
-  gfx->setTextColor(COLOR_TEXT, COLOR_PANEL);
-  gfx->setTextSize(2);
-  gfx->setCursor(62, 200);
-  gfx->print("Returning...");
-  gfx->setTextColor(COLOR_MUTED, COLOR_PANEL);
-  gfx->setTextSize(1);
-  gfx->setCursor(62, 238);
-  gfx->print("Reconnecting Wi-Fi");
-  present();
-
-  refreshDashboardConnectionNow();
-  view = View::Dashboard;
-  drawDashboard();
-}
-
 // ---------------------------------------------------------------------------
 // Touch pages: detail / weather / settings, plus navigation.
 // ---------------------------------------------------------------------------
@@ -1594,7 +1370,7 @@ static constexpr int THEME_ROW_Y = 174;
 static constexpr int THEME_SW_Y = 178, THEME_SW_W = 44, THEME_SW_H = 34, THEME_SW_X0 = 150, THEME_SW_GAP = 52;
 static constexpr int APP_W = 92, APP_H = 58, APP_GAP = 6, APP_X0 = 14;
 static constexpr int APP_ROW1_Y = 244, APP_ROW2_Y = 308;
-static constexpr int SYS_Y = 396, SYS_W = 92, SYS_H = 42;
+static constexpr int SYS_Y = 396, SYS_W = 69, SYS_H = 42, SYS_GAP = 4;
 
 // App tile rect for index 0..4 (row-major, 3 per row).
 void appTileRect(int idx, int& x, int& y) {
@@ -1603,7 +1379,7 @@ void appTileRect(int idx, int& x, int& y) {
 }
 
 // System button rect for column 0..2.
-void sysBtnRect(int col, int& x) { x = APP_X0 + col * (APP_W + APP_GAP); }
+void sysBtnRect(int col, int& x) { x = APP_X0 + col * (SYS_W + SYS_GAP); }
 
 void drawBackButton() {
   gfx->fillRoundRect(BACK_X, BACK_Y, BACK_W, BACK_H, 8, COLOR_PANEL_2);
@@ -2034,8 +1810,9 @@ void drawSettingsPage() {
 
   drawSectionHeader(382, tr("SYSTEM", "系統"));
   drawSysButton(0, "Wi-Fi", COLOR_CODEX);
-  drawSysButton(1, tr("Refresh", "重新整理"), COLOR_GOOD);
-  drawSysButton(2, tr("Restart", "重新啟動"), COLOR_DANGER);
+  drawSysButton(1, tr("Server", "伺服器"), COLOR_CLAUDE);
+  drawSysButton(2, tr("Refresh", "重新整理"), COLOR_GOOD);
+  drawSysButton(3, tr("Restart", "重新啟動"), COLOR_DANGER);
   present();
 }
 
@@ -2094,27 +1871,44 @@ void drawWifiKeyPage() {
   drawPanel(8, 8, 304, 464);
   drawBackButton();
 
+  const char* title = kbEditingUrl ? "Server" : "Password";
   gfx->setTextColor(COLOR_CODEX, COLOR_PANEL);
   gfx->setFont(&fonts::DejaVu24);
-  gfx->setCursor(300 - gfx->textWidth("Password"), 20);
-  gfx->print("Password");
+  gfx->setCursor(300 - gfx->textWidth(title), 20);
+  gfx->print(title);
   gfx->setFont(&fonts::Font2);
 
-  // SSID + typed password field.
+  // Context line (SSID, or the current URL) + typed field.
   gfx->setTextColor(COLOR_MUTED, COLOR_PANEL);
   gfx->setTextSize(1);
   gfx->setCursor(20, 74);
-  gfx->print("Network");
+  gfx->print(kbEditingUrl ? "Current (OK on empty keeps it)" : "Network");
   gfx->setTextColor(COLOR_TEXT, COLOR_PANEL);
-  gfx->setFont(&fonts::DejaVu18);
-  gfx->setCursor(20, 86);
-  gfx->print(fittedText(inputSsid, 24));
+  if (kbEditingUrl) {
+    String current = runtimeApiUrl;
+    if (current.startsWith("http://")) current = current.substring(7);
+    gfx->setCursor(20, 92);
+    gfx->print(fittedText(current, 34));
+  } else {
+    gfx->setFont(&fonts::DejaVu18);
+    gfx->setCursor(20, 86);
+    gfx->print(fittedText(inputSsid, 24));
+  }
 
+  if (kbEditingUrl) {
+    gfx->setFont(&fonts::Font2);
+    gfx->setTextColor(COLOR_MUTED, COLOR_PANEL);
+    gfx->setCursor(20, 166);
+    gfx->print("IP -> http://<ip>/dashboard.json");
+  }
+  gfx->setFont(&fonts::DejaVu18);
   gfx->fillRoundRect(20, 120, 280, 34, 6, COLOR_PANEL_2);
   gfx->drawRoundRect(20, 120, 280, 34, 6, COLOR_CODEX);
   gfx->setTextColor(COLOR_TEXT, COLOR_PANEL_2);
   gfx->setCursor(28, 128);
-  String shown = inputPassword.length() ? fittedText(inputPassword, 21) : String("");
+  // Show the tail while typing so the caret end stays visible.
+  const String& typed = kbText();
+  String shown = typed.length() > 21 ? "~" + typed.substring(typed.length() - 20) : typed;
   gfx->print(shown);
   // caret
   gfx->fillRect(28 + gfx->textWidth(shown) + 1, 127, 2, 18, COLOR_CODEX);
@@ -2155,10 +1949,11 @@ bool refreshDashboardConnectionNow();
 
 void handleWifiKeyTap(uint16_t x, uint16_t y) {
   if (pointInRect(x, y, BACK_X, BACK_Y, BACK_W, BACK_H)) {
-    view = View::WifiScan;
+    view = kbEditingUrl ? View::Settings : View::WifiScan;
     drawCurrentView();
     return;
   }
+  String& text = kbText();
   const char* r0 = kbSymbols ? KB_SYM0 : KB_ROW0;
   const char* r1 = kbSymbols ? KB_SYM1 : KB_ROW1;
   const char* r2 = kbSymbols ? KB_SYM2 : KB_ROW2;
@@ -2166,19 +1961,31 @@ void handleWifiKeyTap(uint16_t x, uint16_t y) {
   if (!c) c = kbRowHit(r1, KB_ROW1_Y, KB_R1_X, x, y);
   if (!c) c = kbRowHit(r2, KB_ROW2_Y, KB_R2_X, x, y);
   if (c) {
-    inputPassword += c;
+    text += c;
     drawCurrentView();
     return;
   }
   if (pointInRect(x, y, KB_SHIFT_X, KB_ROW2_Y, KB_SHIFT_W, KEY_H)) {
     kbShift = !kbShift;
   } else if (pointInRect(x, y, KB_BKSP_X, KB_ROW2_Y, KB_BKSP_W, KEY_H)) {
-    if (inputPassword.length()) inputPassword.remove(inputPassword.length() - 1);
+    if (text.length()) text.remove(text.length() - 1);
   } else if (pointInRect(x, y, KB_SYM_X, KB_ROW3_Y, KB_SYM_W, KEY_H)) {
     kbSymbols = !kbSymbols;
   } else if (pointInRect(x, y, KB_SPACE_X, KB_ROW3_Y, KB_SPACE_W, KEY_H)) {
-    inputPassword += ' ';
+    text += ' ';
   } else if (pointInRect(x, y, KB_OK_X, KB_ROW3_Y, KB_OK_W, KEY_H)) {
+    if (kbEditingUrl) {
+      // A bare host/IP becomes the standard endpoint; a full URL is kept as-is.
+      inputUrl.trim();
+      if (inputUrl.length()) {
+        runtimeApiUrl = inputUrl.indexOf("://") >= 0 ? inputUrl : "http://" + inputUrl + "/dashboard.json";
+        saveSettings(runtimeWifiSsid, runtimeWifiPassword, runtimeApiUrl);
+      }
+      refreshDashboardConnectionNow();
+      view = View::Dashboard;
+      drawCurrentView();
+      return;
+    }
     // Save and connect.
     saveSettings(inputSsid, inputPassword, runtimeApiUrl);
     runtimeWifiSsid = inputSsid;
@@ -2277,6 +2084,7 @@ void handleWifiScanTap(uint16_t x, uint16_t y) {
     if (pointInRect(x, y, 20, ry, 280, SCAN_ROW_H)) {
       inputSsid = wifiSsids[i];
       inputPassword = "";
+      kbEditingUrl = false;
       kbShift = false;
       kbSymbols = false;
       view = View::WifiKey;
@@ -2755,10 +2563,16 @@ void handleSettingsTap(uint16_t x, uint16_t y) {
     runWifiScan();
     drawCurrentView();
     return;
-  } else if (pointInRect(x, y, APP_X0 + (APP_W + APP_GAP), SYS_Y, SYS_W, SYS_H)) {  // Refresh
+  } else if (pointInRect(x, y, APP_X0 + (SYS_W + SYS_GAP), SYS_Y, SYS_W, SYS_H)) {  // Server URL
+    kbEditingUrl = true;
+    inputUrl = "";
+    kbShift = false;
+    kbSymbols = true;  // URLs start with digits/dots
+    view = View::WifiKey;
+  } else if (pointInRect(x, y, APP_X0 + 2 * (SYS_W + SYS_GAP), SYS_Y, SYS_W, SYS_H)) {  // Refresh
     refreshDashboardConnectionNow();
     view = View::Dashboard;
-  } else if (pointInRect(x, y, APP_X0 + 2 * (APP_W + APP_GAP), SYS_Y, SYS_W, SYS_H)) {  // Restart
+  } else if (pointInRect(x, y, APP_X0 + 3 * (SYS_W + SYS_GAP), SYS_Y, SYS_W, SYS_H)) {  // Restart
     ESP.restart();
   } else {
     for (int i = 0; i < 5; ++i) {
@@ -2899,14 +2713,6 @@ void loop() {
   delay(20);
   return;
 #endif
-
-  if (setupMode) {
-    dnsServer.processNextRequest();
-    setupServer.handleClient();
-    handleSetupTouch();
-    delay(10);
-    return;
-  }
 
   handleTouch();
   toolsTick();

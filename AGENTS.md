@@ -61,9 +61,11 @@ Read top-to-bottom; it is organized in this order:
    `drawAgentTile`, `drawWeatherTile`, `drawDashboard`.
    Animation is driven by the global `animationFrame` (incremented each render
    tick); helpers use `animationFrame % N` for blink/motion phase.
-5. **Setup portal** — `startWifiSetupPortal` (SoftAP `ESP32-Dashboard-Setup` +
-   captive DNS + `WebServer` on `192.168.4.1`), HTML handlers, and
-   `returnToDashboardFromSetup`. Entered by a ~1.2 s long-press (`handleTouch`).
+5. **On-device settings input** — `WifiScan` → `WifiKey` touch QWERTY for the
+   Wi-Fi password; Settings → **Server** reuses the same keyboard with
+   `kbEditingUrl` (`kbText()` picks the buffer) to edit the dashboard URL. A bare
+   host/IP becomes `http://<host>/dashboard.json`. The URL is stored in NVS `api`,
+   which overrides `DASHBOARD_API_URL`. There is no AP/web setup portal.
 6. **Data layer** — `fetchDashboardState` (HTTP GET → `ArduinoJson` → `state`),
    `applyQuota`, `parseWeatherKind`. Sets `state.online` + `lastSuccessMs`.
 7. **Network helpers** — `connectWifi` (blocking initial connect + `startNtp`),
@@ -74,8 +76,7 @@ Read top-to-bottom; it is organized in this order:
 
 ```
 loop():
-  if setupMode: service DNS + web server + setup touch; return
-  handleTouch()                                  # long-press → setup portal
+  handleTouch()                                  # tap → page nav; long-press → Settings
   every DASHBOARD_REFRESH_MS (60 s):             # from dashboard_config.h
       maybeReconnectWifi(); fetchDashboardState()
   every RENDER_INTERVAL_MS (1 s):
@@ -111,10 +112,9 @@ firmware shows the dashboard fine without them.
 `enum View { Dashboard, DetailCodex, DetailClaude, Weather, Settings }` +
 `drawCurrentView()`. Tap a tile → its detail page (big bars + tokens + ~NT$);
 tap the weather tile → weather page (hourly strip); long-press → on-device
-Settings (brightness ∓, night dim Auto/Off, refresh, wi-fi setup, restart;
-persisted via `saveDisplaySettings`). Sub-pages return via the top-left `< Back`.
-Navigation lives in `handleTap` / `handleLongPress`; the Wi-Fi portal is still
-separate (`setupMode`, its own web server). Low quota (<10% remaining) blinks
+Settings (brightness ∓, night dim Auto/Off, Wi-Fi, server URL, refresh, restart;
+persisted via `saveDisplaySettings` / `saveSettings`). Sub-pages return via the
+top-left `< Back`. Navigation lives in `handleTap` / `handleLongPress`. Low quota (<10% remaining) blinks
 XL9555 LED1 (`boardSetLed`) — no on-screen border.
 
 - `used_pct` is *used*; the UI shows `100 - used_pct` as remaining.
@@ -129,7 +129,7 @@ XL9555 LED1 (`boardSetLed`) — no on-screen border.
 
 ```bash
 .venv/bin/pio run -d firmware                       # build default env
-.venv/bin/pio run -d firmware -t upload             # flash (upload_port /dev/ttyACM0)
+.venv/bin/pio run -d firmware -t upload             # flash (port auto-detected; ttyACM* native USB or ttyUSB* CH340)
 .venv/bin/pio device monitor -d firmware            # serial @ 115200
 
 .venv/bin/pio run -d firmware -e lcd-smoke-st7796   # panel bring-up test (color bars)
@@ -169,10 +169,16 @@ touching `board_config.h` or the render target.
   missing/auth-blocked windows are emitted as `status: "unavailable"` without
   `used_pct`, while confirmed exhaustion is `used_pct: 100`.
 - **Claude quota** is scraped from the Claude `/status` Usage screen via `tmux`
-  (`claude_usage_from_tui`). A successful read is persisted for
-  `DASH_CLAUDE_QUOTA_CACHE_TTL` seconds (default 900) so an intermittent TUI
-  failure can use a bounded last-known-good value; after that the quota is
-  `status: "unavailable"` without `used_pct`. `ccusage` is only for local token
+  (`claude_usage_from_tui` → `parse_claude_status`). A read younger than
+  `DASH_CLAUDE_QUOTA_REFRESH` seconds (default 300) is served as live without
+  relaunching the TUI (each launch costs ~30 s CPU). A failed TUI read falls back
+  to the last good value for `DASH_CLAUDE_QUOTA_CACHE_TTL` seconds (default 900,
+  `status: "cached"`); after that the quota has no `used_pct` and `status` names
+  the reason: `not_logged_in` (run `claude` → `/login` on the collector host),
+  `parse_failed`, `tui_failed`. The firmware treats any such status as unknown.
+  The TUI prints resets in its host's zone (e.g. `7:20am (UTC)`);
+  `compact_tui_reset` converts them to `DASHBOARD_TZ`, so the host's system TZ
+  does not matter. `ccusage` is only for local token
   and cost details — never derive account quota percentage from those totals.
   Claude has no equivalent authoritative file, so its reset is whatever Claude
   itself reports (its 5h block resets at a fixed clock time, not "5h from now").

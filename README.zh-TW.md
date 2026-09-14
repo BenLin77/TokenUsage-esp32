@@ -141,7 +141,7 @@ docs/images/                README 使用的 dashboard 照片
 http://<your-server-host>/dashboard.json
 ```
 
-沒有設定 Wi-Fi 時會維持 demo mode。機身上的 Wi-Fi 流程只負責設定 SSID/password；dashboard JSON URL 來自編譯期／本機設定 `firmware/src/dashboard_config.h`。
+沒有設定 Wi-Fi 時會維持 demo mode。機身上的 Wi-Fi 流程只負責設定 SSID/password。若要不重燒就換 dashboard 伺服器，在 Settings 點 **伺服器**，輸入伺服器 IP 或主機名（例如 `192.168.1.20` 會變成 `http://192.168.1.20/dashboard.json`；含 `://` 的輸入視為完整網址；欄位空白按 OK 則保留目前網址）。存在裝置上的網址（包含 Wi-Fi 流程存入的）會蓋過 `firmware/src/dashboard_config.h` 的 `DASHBOARD_API_URL`，所以只重燒不會改變網址；請用 **伺服器** 設定，或燒錄前先清除 flash（`pio run -d firmware -t erase`）。
 
 ### `firmware/src/dashboard_config.h`
 
@@ -159,7 +159,6 @@ http://<your-server-host>/dashboard.json
 
 - `DASHBOARD_CLOCK_TZ` — 機身時鐘的 POSIX 時區（預設 `CST-8`，即台北 UTC+8）。**不在台灣請務必修改**，例如 `JST-9`、`EST5EDT,M3.2.0,M11.1.0`。
 - `DASHBOARD_NTP_1`、`DASHBOARD_NTP_2` — 對時用的 NTP 伺服器。
-- `DASHBOARD_SETUP_AP_SSID`、`DASHBOARD_SETUP_AP_PASSWORD` — 首次開機的設定熱點（密碼需 >= 8 碼）。
 
 介面語言（English／繁體中文）、主題、亮度是在機身 Settings 內即時選擇並存到 NVS，不屬於這個檔案。
 
@@ -251,7 +250,7 @@ pio device monitor -d firmware
 .venv/bin/pio run -d firmware -t upload
 ```
 
-專案預設 upload port 是 `/dev/ttyACM0`，符合這台機器上連接的 ESP32-S3 USB JTAG/serial 裝置。
+專案不固定 upload/monitor port；PlatformIO 會自動偵測板子接在哪個 USB 口（原生 USB `ttyACM*` 或 CH340 UART `ttyUSB*`）。Serial log 走 USB CDC，所以 `pio device monitor` 只有接原生 USB 口時看得到。
 
 ## Server Collector
 
@@ -263,14 +262,14 @@ http://<your-server-host>/dashboard.json
 
 server 上安裝的檔案（路徑僅為範例，請依你的主機調整）：
 
-- `/opt/esp32-dashboard/dashboard_collector.py`
-- `/opt/esp32-dashboard/.env`（由 `.env.example` 複製；git-ignore）
+- `/home/<user>/code/esp32-dashboard/dashboard_collector.py`
+- `/home/<user>/code/esp32-dashboard/.env`（由 `.env.example` 複製；git-ignore）
 - `/etc/systemd/system/esp32-dashboard.service`
 - `/etc/systemd/system/esp32-dashboard.timer`
 - `/etc/nginx/sites-available/esp32-dashboard`
 - `/var/www/esp32-dashboard/dashboard.json`
 
-timer 每 3 分鐘執行一次。常用檢查：
+timer 每 1 分鐘執行一次。常用檢查：
 
 ```bash
 systemctl status esp32-dashboard.timer --no-pager

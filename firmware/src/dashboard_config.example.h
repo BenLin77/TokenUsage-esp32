@@ -19,8 +19,3 @@
 // #define DASHBOARD_CLOCK_TZ "CST-8"
 // #define DASHBOARD_NTP_1 "pool.ntp.org"
 // #define DASHBOARD_NTP_2 "time.google.com"
-
-// First-boot Wi-Fi setup hotspot (the AP name/password shown on screen when no
-// Wi-Fi is configured). The password must be >= 8 chars.
-// #define DASHBOARD_SETUP_AP_SSID "ESP32-Dashboard-Setup"
-// #define DASHBOARD_SETUP_AP_PASSWORD "esp32setup"
