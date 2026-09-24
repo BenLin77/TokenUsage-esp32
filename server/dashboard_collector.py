@@ -964,19 +964,27 @@ def claude_usage_from_tui(now: datetime) -> dict | str:
   return parse_claude_status("\n".join(captures), now)
 
 
+def last_match(pattern: str, text: str) -> re.Match | None:
+  """The tmux scrollback keeps half-drawn frames of the Usage screen (a weekly
+  row still showing the session's reset, say). The newest frame is at the
+  bottom, so always read the last match, never the first."""
+  match = None
+  for match in re.finditer(pattern, text, re.IGNORECASE):
+    pass
+  return match
+
+
 def parse_claude_status(capture: str, now: datetime) -> dict | str:
   if re.search(r"Not logged in", capture, re.IGNORECASE):
     return "not_logged_in"
   # The reset line keeps its "(Zone)" note so compact_tui_reset can convert it.
-  session_match = re.search(
+  session_match = last_match(
       r"Current session\s+(\d+)%\s+\d+%\s+used\s+Resets\s+([^\n]+)",
       capture,
-      re.IGNORECASE,
   )
-  week_match = re.search(
+  week_match = last_match(
       r"Current week[^\n]*\s+(\d+)%\s+\d+%\s+used\s+Resets\s+([^\n]+)",
       capture,
-      re.IGNORECASE,
   )
   if not session_match or not week_match:
     return "parse_failed"

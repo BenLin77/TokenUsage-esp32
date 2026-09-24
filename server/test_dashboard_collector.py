@@ -807,6 +807,22 @@ class CollectorReliabilityTests(unittest.TestCase):
     self.assertEqual("4h10m", collector.reset_countdown(usage["h5"]["reset"], now))
     self.assertEqual("4d5h", collector.reset_countdown(usage["weekly"]["reset"], now))
 
+  def test_claude_status_reads_the_newest_frame_in_the_scrollback(self) -> None:
+    # Real node5 capture: the scrollback still holds a half-drawn frame whose
+    # weekly row carries the session's reset. Reading the first match reported
+    # the weekly reset as minutes away instead of the next day.
+    now = datetime(2026, 9, 24, 10, 0, tzinfo=collector.TZ)
+    capture = (
+        "Current session\n52% 52% used\nResets 2:20am (UTC)\n"
+        "Current week (all models)\n53% 53% used\nResets 2:20am (UTC)\n"
+        "Current week (all models)\n48% 48% used\nResets Sep 25, 9am (UTC)\n"
+    )
+    usage = collector.parse_claude_status(capture, now)
+
+    self.assertEqual({"used_pct": 52, "reset": "Sep 24, 10:20am"}, usage["h5"])
+    self.assertEqual({"used_pct": 48, "reset": "Sep 25, 5:00pm"}, usage["weekly"])
+    self.assertEqual("1d7h", collector.reset_countdown(usage["weekly"]["reset"], now))
+
   def test_claude_status_reports_why_a_read_failed(self) -> None:
     now = datetime(2026, 9, 14, 11, 10, tzinfo=collector.TZ)
     self.assertEqual("not_logged_in", collector.parse_claude_status("Not logged in · Run /login\n", now))
