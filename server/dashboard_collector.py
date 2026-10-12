@@ -983,7 +983,9 @@ def parse_claude_status(capture: str, now: datetime) -> dict | str:
       capture,
   )
   week_match = last_match(
-      r"Current week[^\n]*\s+(\d+)%\s+\d+%\s+used\s+Resets\s+([^\n]+)",
+      # "(all models)" is the account-wide week; skip per-model rows such as
+      # "Current week (Fable)" that follow it on the Usage screen.
+      r"Current week(?: \(all models\))?\s+(\d+)%\s+\d+%\s+used\s+Resets\s+([^\n]+)",
       capture,
   )
   if not session_match or not week_match:
@@ -1087,13 +1089,24 @@ def _codex_window_from_mapping(window: object) -> dict | None:
   reset = window.get("resetsAt", window.get("reset_at"))
   if used is None or reset is None:
     return None
+  minutes = window.get("windowDurationMins", window.get("window_minutes"))
   try:
     return {
         "used_pct": max(0, min(100, round(float(used)))),
         "reset_epoch": int(reset),
+        "window_mins": int(minutes) if minutes is not None else None,
     }
   except (TypeError, ValueError):
     return None
+
+
+def _codex_window_key(slot: str, window: dict) -> str:
+  """Map a window to primary (5h) / secondary (weekly) by its duration. Codex
+  may send only a weekly window, and it then arrives in the primary slot."""
+  minutes = window.get("window_mins")
+  if minutes is None:
+    return slot
+  return "primary" if minutes <= 24 * 60 else "secondary"
 
 
 def _codex_limits_from_snapshot(snapshot: object, now: datetime) -> dict | None:
@@ -1101,11 +1114,11 @@ def _codex_limits_from_snapshot(snapshot: object, now: datetime) -> dict | None:
     return None
   now_epoch = now.timestamp()
   result = {}
-  for window_name, key in (("primary", "primary"), ("secondary", "secondary")):
+  for window_name in ("primary", "secondary"):
     window = _codex_window_from_mapping(snapshot.get(window_name))
     if not window or window["reset_epoch"] <= now_epoch:
       continue
-    result[key] = {
+    result[_codex_window_key(window_name, window)] = {
         "used_pct": window["used_pct"],
         "reset_at": datetime.fromtimestamp(window["reset_epoch"], TZ),
     }
@@ -1139,11 +1152,13 @@ def _codex_window(name: str, body: str) -> dict | None:
   seg = match.group(1)
   used = re.search(r'"used_?[pP]ercent"\s*:\s*([0-9.]+)', seg)
   reset = re.search(r'"resets?_?[aA]t"\s*:\s*([0-9]+)', seg)
+  minutes = re.search(r'"window_?[mM]inutes"\s*:\s*([0-9]+)|"windowDurationMins"\s*:\s*([0-9]+)', seg)
   if not used or not reset:
     return None
   return _codex_window_from_mapping({
       "used_percent": used.group(1),
       "reset_at": reset.group(1),
+      "window_minutes": (minutes.group(1) or minutes.group(2)) if minutes else None,
   })
 
 
@@ -1174,11 +1189,12 @@ def codex_rate_limits_from_logs(now: datetime) -> dict | None:
   result = {}
   for ts, body in rows:
     _ = ts  # rows are newest-first; reset time decides whether a window is usable.
-    for window_name, key in (("primary", "primary"), ("secondary", "secondary")):
-      if key in result:
-        continue
+    for window_name in ("primary", "secondary"):
       window = _codex_window(window_name, body)
       if not window or window["reset_epoch"] <= now_epoch:
+        continue
+      key = _codex_window_key(window_name, window)
+      if key in result:
         continue
       result[key] = {
           "used_pct": window["used_pct"],

@@ -627,6 +627,27 @@ class CollectorReliabilityTests(unittest.TestCase):
     self.assertEqual(56, limits["secondary"]["used_pct"])
     self.assertEqual(datetime.fromtimestamp(weekly_reset, collector.TZ), limits["secondary"]["reset_at"])
 
+  def test_codex_weekly_only_window_in_primary_slot_maps_to_weekly(self) -> None:
+    # Real 2026-10-12 response: Pro plan sends only the 7-day window, in the
+    # primary slot. It was shown as the 5h tile with a 6-day reset.
+    now = datetime(2026, 10, 12, 10, 0, tzinfo=collector.TZ)
+    weekly_reset = int((now + timedelta(days=6, hours=1)).timestamp())
+    response = {
+        "rateLimitsByLimitId": {
+            "codex": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 27, "windowDurationMins": 10080, "resetsAt": weekly_reset},
+                "secondary": None,
+            }
+        },
+    }
+
+    with patch.object(collector, "codex_app_server_rpc", return_value=response):
+      limits = collector.codex_rate_limits_from_app_server(now)
+
+    self.assertNotIn("primary", limits)
+    self.assertEqual(27, limits["secondary"]["used_pct"])
+
   def test_codex_usage_prefers_app_server_without_tui_warmup(self) -> None:
     now = datetime(2026, 7, 1, 14, 8, tzinfo=collector.TZ)
     week_start = datetime(2026, 6, 29, tzinfo=collector.TZ)
@@ -822,6 +843,20 @@ class CollectorReliabilityTests(unittest.TestCase):
     self.assertEqual({"used_pct": 52, "reset": "Sep 24, 10:20am"}, usage["h5"])
     self.assertEqual({"used_pct": 48, "reset": "Sep 25, 5:00pm"}, usage["weekly"])
     self.assertEqual("1d7h", collector.reset_countdown(usage["weekly"]["reset"], now))
+
+  def test_claude_status_weekly_ignores_per_model_week_rows(self) -> None:
+    # Real 2026-10-12 capture: a "Current week (Fable)" row follows the
+    # account-wide week and was read as the weekly quota.
+    now = datetime(2026, 10, 12, 10, 0, tzinfo=collector.TZ)
+    capture = (
+        "Current session\n5% 5% used\nResets 1:30pm (Asia/Taipei)\n"
+        "Current week (all models)\n44% 44% used\nResets Oct 16, 5pm (Asia/Taipei)\n"
+        "Current week (Fable)\n59% 59% used\nResets Oct 16, 5pm (Asia/Taipei)\n"
+    )
+    usage = collector.parse_claude_status(capture, now)
+
+    self.assertEqual(5, usage["h5"]["used_pct"])
+    self.assertEqual(44, usage["weekly"]["used_pct"])
 
   def test_claude_status_reports_why_a_read_failed(self) -> None:
     now = datetime(2026, 9, 14, 11, 10, tzinfo=collector.TZ)
