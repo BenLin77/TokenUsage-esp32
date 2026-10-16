@@ -106,6 +106,8 @@ CLAUDE_QUOTA_CACHE_TTL = int(os.environ.get("DASH_CLAUDE_QUOTA_CACHE_TTL", "900"
 # Launching the Claude TUI costs ~30 s of CPU, so a cached read younger than this
 # is served as live instead of re-scraping every collector run.
 CLAUDE_QUOTA_REFRESH = int(os.environ.get("DASH_CLAUDE_QUOTA_REFRESH", "300"))
+# Claude's internal state is optional corroboration for a fresh TUI read.
+CLAUDE_STATE_PATH = Path(os.environ.get("DASH_CLAUDE_STATE_PATH", str(Path.home() / ".claude.json")))
 
 # Codex records authoritative rate limits (real used % + reset epoch) into this
 # trace DB on every startup "websocket warmup". Launching the Codex TUI (which
@@ -164,7 +166,8 @@ def unknown_usage(status: str = "unavailable") -> dict:
 
 
 def quota_known(block: object) -> bool:
-  return isinstance(block, dict) and isinstance(block.get("used_pct"), int)
+  return (isinstance(block, dict) and block.get("status") != "conflict"
+          and type(block.get("used_pct")) is int)
 
 
 def usage_complete(usage: dict) -> bool:
@@ -837,16 +840,27 @@ def compact_tui_reset(value: str, now: datetime) -> str:
 
 
 def normalized_claude_quota(usage: object) -> dict | None:
-  if not isinstance(usage, dict) or not usage_complete(usage):
+  if not isinstance(usage, dict) or any(not isinstance(usage.get(window), dict) for window in ("h5", "weekly")):
     return None
   normalized = {}
   for window in ("h5", "weekly"):
     block = usage[window]
     reset = block.get("reset")
-    normalized[window] = quota_usage(
-        block["used_pct"],
-        reset if isinstance(reset, str) and reset else "--",
-    )
+    reset = reset if isinstance(reset, str) and reset else "--"
+    if block.get("status") == "conflict":
+      if "used_pct" in block or "used_pct_exact" in block:
+        return None
+      normalized[window] = unavailable_quota(reset, "conflict")
+      continue
+    used = block.get("used_pct")
+    if type(used) is not int or not 0 <= used <= 100:
+      return None
+    normalized[window] = quota_usage(used, reset)
+    exact = block.get("used_pct_exact")
+    if exact is not None:
+      if type(exact) not in (int, float) or not math.isfinite(exact) or not 0 <= exact <= 100 or math.floor(exact) != used:
+        return None
+      normalized[window]["used_pct_exact"] = exact
   return normalized
 
 
@@ -876,7 +890,10 @@ def read_claude_quota_cache(now: datetime, max_age: int) -> dict | None:
     ).total_seconds()
     if age_seconds < 0 or age_seconds > max_age:
       return None
-    return normalized_claude_quota(payload.get("usage"))
+    usage = normalized_claude_quota(payload.get("usage"))
+    if usage is not None and age_seconds > 300 and any(block.get("status") == "conflict" for block in usage.values()):
+      return None
+    return usage
   except FileNotFoundError:
     return None
   except (OSError, KeyError, TypeError, ValueError) as exc:
@@ -901,7 +918,8 @@ def claude_usage(now: datetime, week_start: datetime) -> dict:
   cached_usage = read_claude_quota_cache(now, CLAUDE_QUOTA_CACHE_TTL)
   if cached_usage is not None:
     for block in cached_usage.values():
-      block["status"] = "cached"
+      if block.get("status") != "conflict":
+        block["status"] = "cached"
     return cached_usage
 
   # ccusage only knows token totals from local log files. Those totals are not
@@ -915,6 +933,8 @@ def claude_usage_from_tui(now: datetime) -> dict | str:
   session = f"esp32_claude_usage_{os.getpid()}_{int(time.time())}"
   workdir = Path.home() / "code" / "esp32-dashboard" / "claude-usage-workdir"
   captures: list[str] = []
+  viewports: list[str] = []
+  started_at = datetime.now(timezone.utc)
   try:
     workdir.mkdir(parents=True, exist_ok=True)
     subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
@@ -956,12 +976,76 @@ def claude_usage_from_tui(now: datetime) -> dict | str:
               timeout=5,
           ).stdout
       )
+      viewports.append(subprocess.run(
+          ["tmux", "capture-pane", "-t", session, "-p"],
+          check=True, capture_output=True, text=True, timeout=5,
+      ).stdout)
   except Exception:
     return "tui_failed"
   finally:
     subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
+  # Only a single current viewport can corroborate a warning. Scrollback may
+  # contain banners and partial rows from earlier frames.
+  for viewport in reversed(viewports):
+    parsed = parse_claude_status(viewport, now, warning_capture=viewport)
+    if isinstance(parsed, dict):
+      snapshot = read_claude_usage_snapshot(datetime.now(timezone.utc), started_at)
+      return reconcile_claude_snapshot(parsed, snapshot, now)
   return parse_claude_status("\n".join(captures), now)
+
+
+def read_claude_usage_snapshot(now: datetime, started_at: datetime) -> dict | None:
+  """Read only validated quota fields from Claude's optional local state."""
+  try:
+    state = json.loads(CLAUDE_STATE_PATH.read_text(encoding="utf-8"))
+    cached = state["cachedUsageUtilization"]
+    account = cached["accountUuid"]
+    if not isinstance(account, str) or not account or account != state["oauthAccount"]["accountUuid"]:
+      return None
+    stamp = cached["fetchedAtMs"]
+    if type(stamp) not in (int, float) or not math.isfinite(stamp):
+      return None
+    fetched = datetime.fromtimestamp(stamp / 1000, timezone.utc)
+    age = (now.astimezone(timezone.utc) - fetched).total_seconds()
+    if age < 0 or age > 60 or fetched < started_at.astimezone(timezone.utc):
+      return None
+    result = {}
+    for window, key in (("h5", "five_hour"), ("weekly", "seven_day")):
+      raw = cached["utilization"][key]
+      exact = raw["utilization"]
+      if type(exact) not in (int, float) or not math.isfinite(exact) or not 0 <= exact <= 100:
+        return None
+      reset_text = raw["resets_at"]
+      if not isinstance(reset_text, str):
+        return None
+      reset = parse_instant(reset_text)
+      if reset.tzinfo is None or reset <= now:
+        return None
+      result[window] = {"used_pct_exact": exact, "reset_at": reset}
+    return result
+  except (OSError, ValueError, TypeError, KeyError, OverflowError):
+    return None
+
+
+def reconcile_claude_snapshot(usage: dict, snapshot: dict | None, now: datetime) -> dict:
+  if snapshot is None:
+    return usage
+  result = {window: block.copy() for window, block in usage.items()}
+  for window in ("h5", "weekly"):
+    block = result[window]
+    if block.get("status") == "conflict":
+      continue
+    tui_reset = parse_datetime_target(block["reset"], now)
+    raw = snapshot[window]
+    if tui_reset is None or tui_reset.astimezone(timezone.utc).replace(second=0, microsecond=0) != raw["reset_at"].astimezone(timezone.utc).replace(second=0, microsecond=0):
+      continue
+    exact = raw["used_pct_exact"]
+    if math.floor(exact) == block["used_pct"]:
+      block["used_pct_exact"] = exact
+    else:
+      result[window] = unavailable_quota(block["reset"], "conflict")
+  return result
 
 
 def last_match(pattern: str, text: str) -> re.Match | None:
@@ -974,24 +1058,24 @@ def last_match(pattern: str, text: str) -> re.Match | None:
   return match
 
 
-def parse_claude_status(capture: str, now: datetime) -> dict | str:
+def parse_claude_status(capture: str, now: datetime, warning_capture: str | None = None) -> dict | str:
   if re.search(r"Not logged in", capture, re.IGNORECASE):
     return "not_logged_in"
   # The reset line keeps its "(Zone)" note so compact_tui_reset can convert it.
   session_match = last_match(
-      r"Current session\s+(\d+)%\s+\d+%\s+used\s+Resets\s+([^\n]+)",
+      r"Current session\s+(?:\d+%\s+)?(\d+)%\s+used\s+Resets\s+([^\n]+)",
       capture,
   )
   week_match = last_match(
       # "(all models)" is the account-wide week; skip per-model rows such as
       # "Current week (Fable)" that follow it on the Usage screen.
-      r"Current week(?: \(all models\))?\s+(\d+)%\s+\d+%\s+used\s+Resets\s+([^\n]+)",
+      r"Current week(?: \(all models\))?\s+(?:\d+%\s+)?(\d+)%\s+used\s+Resets\s+([^\n]+)",
       capture,
   )
   if not session_match or not week_match:
     return "parse_failed"
 
-  return {
+  result = {
       "h5": {
           "used_pct": max(0, min(100, int(session_match.group(1)))),
           "reset": compact_tui_reset(session_match.group(2), now),
@@ -1001,6 +1085,11 @@ def parse_claude_status(capture: str, now: datetime) -> dict | str:
           "reset": compact_tui_reset(week_match.group(2), now),
       },
   }
+  if warning_capture is not None:
+    warning = last_match(r"You've used\s+(\d+)%\s+of your weekly limit", warning_capture)
+    if warning and int(warning.group(1)) != result["weekly"]["used_pct"]:
+      result["weekly"] = unavailable_quota(result["weekly"]["reset"], "conflict")
+  return result
 
 
 def codex_app_server_rpc(method: str, timeout: float = 15.0) -> dict:

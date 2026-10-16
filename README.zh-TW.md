@@ -232,6 +232,8 @@ python3 server/mock_dashboard_server.py --host 0.0.0.0 --port 8080
 
 天氣可選欄位：`aqi`（美制 AQI，磚上依等級變色）、`uv`（最大紫外線指數）、`sunrise`/`sunset`（`HH:MM`）、`city_zh`（切換成繁體中文介面時顯示的在地地名）。`agent.models` 每筆（`name`、`pct`、`tok`）驅動 detail 頁的模型分佈長條。介面語言（English／中文）與主題在裝置的 Settings 內切換，JSON 本身維持語言中立。
 
+額度可選欄位 `used_pct_exact` 保留來源提供的小數，例如 `{"used_pct": 99, "used_pct_exact": 99.6}` 會顯示剩餘 `<1%`；精確值為 100 才按該值顯示 `0%`。沒有精確值時沿用 `used_pct` 的整數顯示，不推算小數。若同次讀取的來源互相矛盾，送 `status: "conflict"` 並省略兩個百分比欄位，面板顯示「更新中」（英文 `sync`）。
+
 ## Build And Upload
 
 韌體是位於 `firmware/` 的 PlatformIO 專案。需要 PlatformIO，並在 repo 根目錄用
@@ -294,13 +296,18 @@ curl -fsS http://<your-server-host>/dashboard.json | python3 -m json.tool
 | `DASHBOARD_RAIN_LOOKAHEAD_HOURS` | `0` | 可觸發警示的額外未來小時；`0` 代表只看目前小時。 |
 | `DASHBOARD_RAIN_ALERT_PRECIP_MM` | `1.5` | 同一小時需達到的預估雨量，作為琥珀警示佐證。 |
 | `DASHBOARD_WEATHER_CACHE_TTL` | `90` | 天氣快取秒數。 |
-| `DASH_CLAUDE_5H_LIMIT` / `_WEEKLY_LIMIT` | `50000000` / `100000000` | 計算 Claude 已用 % 的 token 上限。 |
+| `DASH_CLAUDE_QUOTA_REFRESH` | `300` | 重新讀取 Claude 額度的間隔秒數。 |
+| `DASH_CLAUDE_QUOTA_CACHE_TTL` | `900` | 抓取失敗時可沿用額度快取的最長秒數。 |
+| `DASH_CLAUDE_QUOTA_CACHE` | collector 旁的 `.claude_quota_cache.json` | 跨收集器執行保存的額度快取。 |
+| `DASH_CLAUDE_STATE_PATH` | `~/.claude.json` | Claude 內部額度快照的唯讀來源；自訂設定目錄時明確指定。 |
 | `DASH_USD_TWD` | `32.5` | `cost_twd` 用的美元→台幣匯率。 |
 | `DASH_CCUSAGE_NPX_PACKAGE` | `ccusage@20.0.14` | 由 `npx` 執行的 `ccusage` 版本。 |
 
 Codex quota 會直接啟動目前的 Codex CLI：`codex app-server --stdio`，再用
 JSON-RPC `account/rateLimits/read` 讀取。舊的 TUI/log 路徑只當 fallback，
 所以 CLI 更新後即使背景 app-server 還停在舊版，也不會擋住新的 quota 查詢。
+
+Claude 額度仍由其 Usage 畫面讀取，不能用本機 token 總量估算。收集器另核對 Claude 自己保存的 `cachedUsageUtilization` 快照，僅在帳號、時間與額度視窗通過檢查時保留其數值精度；不額外呼叫私有 API。這是 Claude 的內部格式，格式變更、快照過期或缺失時回退到畫面整數。來源若只提供 100，就不能推論成 99.x；數值衝突時等待下一次更新。
 
 天氣位置準確度優先使用 server `.env` 的固定座標 `DASHBOARD_LAT` /
 `DASHBOARD_LON`。如果兩者留空，也可以用 `DASHBOARD_AUTO_LOCATION=1` 從

@@ -8,6 +8,7 @@
 
 #include "board_config.h"
 #include "dashboard_connection_health.h"
+#include "quota_display.h"
 
 #if __has_include("dashboard_config.h")
 #include "dashboard_config.h"
@@ -144,15 +145,15 @@ struct WeatherState {
 
 struct QuotaState {
   String name;
-  int usedPct = 0;
-  bool known = true;
+  QuotaDisplay display;
   String reset = "--";
   int64_t tokens = -1; // total tokens in this window, -1 = unknown
   int costTwd = -1;    // API-equivalent cost in NT$, -1 = unknown
 
   QuotaState() = default;
   QuotaState(const char* quotaName, int usedPercent, const char* resetAt)
-      : name(quotaName), usedPct(usedPercent), reset(resetAt) {}
+      : name(quotaName), display(selectQuotaDisplay(false, false, 0, true, usedPercent, false)),
+        reset(resetAt) {}
 };
 
 // Per-agent daily token history + accumulated totals for the detail chart.
@@ -408,17 +409,17 @@ int clampPct(int value) {
   return value;
 }
 
-uint32_t colorForRemaining(int remainingPct) {
+uint32_t colorForRemaining(double remainingPct) {
   if (remainingPct < 0) return COLOR_MUTED;
   if (remainingPct <= 15) return COLOR_DANGER;
   if (remainingPct <= 35) return COLOR_WARN;
   return COLOR_GOOD;
 }
 
-int remainingPct(const QuotaState& q) { return q.known ? 100 - clampPct(q.usedPct) : -1; }
+double remainingPct(const QuotaState& q) { return quotaRemaining(q.display); }
 
 bool quotaCritical(const QuotaState& q) {
-  return q.known && remainingPct(q) < QUOTA_CRITICAL_REMAINING;
+  return q.display.known && remainingPct(q) < QUOTA_CRITICAL_REMAINING;
 }
 
 // True if either window of an agent is below the low-quota threshold.
@@ -850,14 +851,12 @@ void drawWeatherTile() {
   }
 }
 
-void drawUsageBar(int x, int y, int w, int usedPct, uint32_t accent, bool known) {
+void drawUsageBar(int x, int y, int w, double remaining, uint32_t accent, bool known) {
   gfx->fillRoundRect(x, y, w, 12, 6, COLOR_PANEL_2);
   if (!known) {
     gfx->drawRoundRect(x, y, w, 12, 6, COLOR_MUTED);
     return;
   }
-  int used = clampPct(usedPct);
-  int remaining = 100 - used;
   uint32_t status = colorForRemaining(remaining);
 
   int fillW = (w * remaining) / 100;
@@ -866,8 +865,9 @@ void drawUsageBar(int x, int y, int w, int usedPct, uint32_t accent, bool known)
 }
 
 void drawQuotaBlock(int x, int y, int w, const char* label, const QuotaState& quota, uint32_t accent) {
-  int used = quota.known ? clampPct(quota.usedPct) : 0;
-  int remaining = remainingPct(quota);
+  double remaining = remainingPct(quota);
+  char remainingText[16];
+  formatQuotaRemaining(quota.display, remainingText, sizeof(remainingText), zhUi());
 
   // Top row: window label (left) + reset countdown (right).
   setUiFont();
@@ -883,16 +883,18 @@ void drawQuotaBlock(int x, int y, int w, const char* label, const QuotaState& qu
   // value lives on the detail page) so the large number never collides. Sits a
   // little lower so the label's descenders (the y in "Weekly") aren't clipped.
   gfx->setTextColor(COLOR_TEXT, COLOR_PANEL);
-  gfx->setFont(&fonts::DejaVu40);
-  gfx->setCursor(x, y + 16);
-  if (quota.known) {
-    gfx->printf("%d%%", remaining);
+  if (quota.display.conflict) {
+    setUiFont24();
+    gfx->setCursor(x, y + 27);
+    gfx->print(remainingText);
   } else {
-    gfx->print("--%");
+    gfx->setFont(&fonts::DejaVu40);
+    gfx->setCursor(x, y + 16);
+    gfx->print(remainingText);
   }
   gfx->setFont(&fonts::Font2);
 
-  drawUsageBar(x, y + 60, w, used, accent, quota.known);
+  drawUsageBar(x, y + 60, w, remaining, accent, quota.display.known);
 }
 
 // Blend two 0xRRGGBB colours channel-wise; t=0 → a, t=1 → b.
@@ -1055,24 +1057,21 @@ void handleTouch() {
 void applyQuota(JsonVariantConst src, QuotaState& dst) {
   dst.tokens = -1;
   dst.costTwd = -1;
-  dst.known = false;
-  dst.usedPct = 0;
+  dst.display = QuotaDisplay{};
   if (src.isNull()) {
     dst.reset = "--";
     return;
   }
-  if (src["used_pct"].is<int>()) {
-    dst.usedPct = clampPct(src["used_pct"].as<int>());
-    dst.known = true;
-  }
   const char* status = src["status"].is<const char*>() ? src["status"].as<const char*>() : nullptr;
-  if (!dst.known && status && (strcmp(status, "exhausted") == 0 || strcmp(status, "limited") == 0)) {
-    dst.usedPct = 100;
-    dst.known = true;
-  }
+  JsonVariantConst exact = src["used_pct_exact"];
+  const bool exactNumber = exact.is<float>() || exact.is<double>() || exact.is<int>() || exact.is<int64_t>();
+  dst.display = selectQuotaDisplay(status && strcmp(status, "conflict") == 0,
+                                   exactNumber, exactNumber ? exact.as<double>() : 0,
+                                   src["used_pct"].is<int>(), src["used_pct"] | 0,
+                                   status && (strcmp(status, "exhausted") == 0 || strcmp(status, "limited") == 0));
   if (src["reset"].is<const char*>()) {
     dst.reset = boundedText(src["reset"].as<const char*>(), MAX_RESET_TEXT);
-  } else if (!dst.known) {
+  } else if (!dst.display.known) {
     dst.reset = "--";
   }
   if (src["tokens"].is<int64_t>()) {
@@ -1421,15 +1420,21 @@ uint32_t scaleColor(uint32_t color, uint8_t num, uint8_t den) {
 
 // Compact one-line window summary: "5h  82% left      4h1m".
 void drawRateSummary(int x, int y, const char* label, const QuotaState& quota) {
-  int rem = remainingPct(quota);
+  double rem = remainingPct(quota);
+  char remainingText[16];
+  formatQuotaRemaining(quota.display, remainingText, sizeof(remainingText), zhUi());
   setUiFont18();
   gfx->setTextColor(COLOR_MUTED, COLOR_PANEL);
   gfx->setCursor(x, y);
   gfx->print(label);
-  gfx->setTextColor(quota.known ? colorForRemaining(rem) : COLOR_MUTED, COLOR_PANEL);
+  gfx->setTextColor(quota.display.known ? colorForRemaining(rem) : COLOR_MUTED, COLOR_PANEL);
   gfx->setCursor(x + 44, y);
-  if (quota.known) {
-    gfx->printf(tr("%d%% left", "剩 %d%%"), rem);
+  if (quota.display.conflict) {
+    gfx->print(remainingText);
+  } else if (quota.display.known) {
+    if (zhUi()) gfx->print("剩 ");
+    gfx->print(remainingText);
+    if (!zhUi()) gfx->print(" left");
   } else {
     gfx->print(tr("--% left", "剩 --%"));
   }

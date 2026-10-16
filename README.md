@@ -244,6 +244,8 @@ The firmware expects this JSON shape:
 
 Optional weather extras: `aqi` (US AQI, colour-coded on the tile), `uv` (max UV index), `sunrise`/`sunset` (`HH:MM`), and `city_zh` (localised city name shown when the device UI is switched to Traditional Chinese). Each `agent.models` entry (`name`, `pct`, `tok`) drives the detail-page model-mix bar. The device UI language (English/中文) and theme are chosen on-device in Settings; the JSON stays language-neutral.
 
+Optional `used_pct_exact` preserves source precision: `{"used_pct": 99, "used_pct_exact": 99.6}` displays `<1%` remaining, while an exact 100 displays `0%`. Without this field, the existing integer display is unchanged; no decimal precision is inferred. Conflicting readings use `status: "conflict"` with both percentage fields omitted, displaying `sync` (「更新中」 in Chinese).
+
 ## Build And Upload
 
 The firmware is a PlatformIO project under `firmware/`. Install PlatformIO if
@@ -307,8 +309,10 @@ variables:
 | `DASHBOARD_RAIN_LOOKAHEAD_HOURS` | `0` | Additional future hours allowed to trigger an alert; `0` means current hour only. |
 | `DASHBOARD_RAIN_ALERT_PRECIP_MM` | `1.5` | Same-hour expected rain required to corroborate an amber alert. |
 | `DASHBOARD_WEATHER_CACHE_TTL` | `90` | Weather cache lifetime (seconds). |
+| `DASH_CLAUDE_QUOTA_REFRESH` | `300` | Interval between Claude quota reads (seconds). |
 | `DASH_CLAUDE_QUOTA_CACHE_TTL` | `900` | Maximum age in seconds for the last successful Claude `/status` read. Expired/missing quota displays as unavailable. |
 | `DASH_CLAUDE_QUOTA_CACHE` | `.claude_quota_cache.json` beside collector | Persistent cache used across one-shot collector runs. |
+| `DASH_CLAUDE_STATE_PATH` | `~/.claude.json` | Read-only Claude internal quota snapshot; set explicitly for a custom configuration directory. |
 | `DASH_USD_TWD` | `32.5` | USD→TWD rate for the `cost_twd` figures. |
 | `DASH_CCUSAGE_NPX_PACKAGE` | `ccusage@20.0.14` | Pinned `ccusage` version run via `npx`. |
 
@@ -316,6 +320,14 @@ Codex quota is read directly from the current Codex CLI by launching
 `codex app-server --stdio` and calling JSON-RPC `account/rateLimits/read`.
 The old TUI/log path is only a fallback, so a stale background app-server does
 not block fresh quota reads after a CLI update.
+
+Claude quota still comes from its Usage screen, never from local token totals.
+The collector also checks Claude's own `cachedUsageUtilization` snapshot and
+retains its numeric precision only after account, timestamp, and quota-window
+validation. It makes no additional private API requests. This is an internal
+Claude format: missing, stale, or incompatible snapshots fall back to screen
+integers. A source value of 100 is never guessed to mean 99.x; conflicting
+readings wait for the next refresh.
 
 For weather accuracy, set fixed coordinates in the server `.env` with
 `DASHBOARD_LAT` and `DASHBOARD_LON`. If those are blank, optional

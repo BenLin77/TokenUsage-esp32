@@ -117,7 +117,10 @@ persisted via `saveDisplaySettings` / `saveSettings`). Sub-pages return via the
 top-left `< Back`. Navigation lives in `handleTap` / `handleLongPress`. Low quota (<10% remaining) blinks
 XL9555 LED1 (`boardSetLed`) — no on-screen border.
 
-- `used_pct` is *used*; the UI shows `100 - used_pct` as remaining.
+- `used_pct` is *used*. Optional `used_pct_exact` preserves source precision;
+  `quota_display.h` shows positive remaining below 1% as `<1%`. Keep the integer
+  field for old firmware. `status: "conflict"` omits both percentages and shows
+  `sync` / 更新中 on the dashboard and detail page.
 - `condition` keywords → `parseWeatherKind()` in `main.cpp` and
   `condition_for_weather_code()` / `cwa_condition_from_text()` in the collector.
   **Keep these in sync** when adding a weather type.
@@ -182,6 +185,13 @@ touching `board_config.h` or the render target.
   and cost details — never derive account quota percentage from those totals.
   Claude has no equivalent authoritative file, so its reset is whatever Claude
   itself reports (its 5h block resets at a fixed clock time, not "5h from now").
+  Precision corroboration reads `cachedUsageUtilization` from `~/.claude.json`
+  (override `DASH_CLAUDE_STATE_PATH`): require matching account, a snapshot from
+  this TUI read no older than 60 seconds, and matching reset windows. This is an
+  internal, optional format; missing/invalid snapshots retain the TUI integer.
+  Compare warning banners only within the same complete current viewport,
+  never old scrollback. Conflicts stay unknown and expire after 300 seconds;
+  a source value of 100 must not be guessed to mean 99.x.
 - Reset strings: codex windows are humanized from the reset epoch
   (`humanize_delta`, e.g. `4h7m`, `6d1h`); other sources may return clock/weekday
   strings that `reset_countdown()` rewrites. Humanized strings pass through

@@ -7,7 +7,8 @@ import json
 import unittest
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -862,6 +863,128 @@ class CollectorReliabilityTests(unittest.TestCase):
     now = datetime(2026, 9, 14, 11, 10, tzinfo=collector.TZ)
     self.assertEqual("not_logged_in", collector.parse_claude_status("Not logged in · Run /login\n", now))
     self.assertEqual("parse_failed", collector.parse_claude_status("1. Auto-compact: true\n", now))
+
+  def test_claude_status_uses_explicit_used_number_and_current_warning(self) -> None:
+    now = datetime(2026, 10, 16, 12, tzinfo=collector.TZ)
+    rows = (
+        "Current session\n99% 100% used\nResets 1:30pm (Asia/Taipei)\n"
+        "Current week (all models)\n99% 100% used\nResets Oct 17, 5pm (Asia/Taipei)\n"
+    )
+    warning = "You've used 99% of your weekly limit\n" + rows
+    result = collector.parse_claude_status(rows, now, warning_capture=warning)
+    self.assertEqual(100, result["h5"]["used_pct"])
+    self.assertEqual("conflict", result["weekly"]["status"])
+    self.assertNotIn("used_pct", result["weekly"])
+    self.assertEqual(100, collector.parse_claude_status(rows, now)["weekly"]["used_pct"])
+    single = rows.replace("99% 100% used", "100% used")
+    self.assertEqual(100, collector.parse_claude_status(single, now)["h5"]["used_pct"])
+
+  def test_claude_snapshot_validates_timestamp_account_numbers_and_resets(self) -> None:
+    now = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
+    start = now - timedelta(seconds=30)
+    def snapshot(value=99.6, stamp=None, account="account", reset=None):
+      return {
+          "oauthAccount": {"accountUuid": "account"},
+          "cachedUsageUtilization": {
+              "accountUuid": account,
+              "fetchedAtMs": int((stamp or now).timestamp() * 1000),
+              "utilization": {
+                  "five_hour": {"utilization": value, "resets_at": reset or "2026-10-16T13:30:00Z"},
+                  "seven_day": {"utilization": 100, "resets_at": "2026-10-17T09:00:00Z"},
+              },
+          },
+      }
+    with tempfile.TemporaryDirectory() as tmpdir:
+      path = Path(tmpdir) / "state.json"
+      with patch.object(collector, "CLAUDE_STATE_PATH", path):
+        for value in (99.6, 100):
+          path.write_text(json.dumps(snapshot(value)), encoding="utf-8")
+          self.assertEqual(value, collector.read_claude_usage_snapshot(now, start)["h5"]["used_pct_exact"])
+        for value in (float("nan"), float("inf"), True, -1, 101):
+          path.write_text(json.dumps(snapshot(value)), encoding="utf-8")
+          self.assertIsNone(collector.read_claude_usage_snapshot(now, start))
+        for stamp in (now + timedelta(seconds=1), start - timedelta(seconds=1), now - timedelta(seconds=61)):
+          path.write_text(json.dumps(snapshot(stamp=stamp)), encoding="utf-8")
+          self.assertIsNone(collector.read_claude_usage_snapshot(now, start))
+        path.write_text(json.dumps(snapshot(account="other")), encoding="utf-8")
+        self.assertIsNone(collector.read_claude_usage_snapshot(now, start))
+        path.write_text(json.dumps(snapshot(reset="2026-10-16T11:00:00Z")), encoding="utf-8")
+        self.assertIsNone(collector.read_claude_usage_snapshot(now, start))
+        for invalid_reset in (None, 123):
+          state = snapshot()
+          state["cachedUsageUtilization"]["utilization"]["five_hour"]["resets_at"] = invalid_reset
+          path.write_text(json.dumps(state), encoding="utf-8")
+          self.assertIsNone(collector.read_claude_usage_snapshot(now, start))
+
+  def test_claude_snapshot_reconciliation_and_cache_roundtrip(self) -> None:
+    now = datetime(2026, 10, 16, 12, tzinfo=collector.TZ)
+    tui = {
+        "h5": {"used_pct": 99, "reset": "Oct 16, 1:30pm"},
+        "weekly": {"used_pct": 100, "reset": "Oct 17, 5:00pm"},
+    }
+    raw = {
+        "h5": {"used_pct_exact": 99.6, "reset_at": datetime(2026, 10, 16, 13, 30, tzinfo=collector.TZ)},
+        "weekly": {"used_pct_exact": 100, "reset_at": datetime(2026, 10, 17, 17, tzinfo=collector.TZ)},
+    }
+    result = collector.reconcile_claude_snapshot(tui, raw, now)
+    self.assertEqual(99, result["h5"]["used_pct"])
+    self.assertEqual(99.6, result["h5"]["used_pct_exact"])
+    self.assertEqual(100, result["weekly"]["used_pct"])
+    mismatched = collector.reconcile_claude_snapshot(tui, {**raw, "weekly": {**raw["weekly"], "reset_at": now + timedelta(days=2)}}, now)
+    self.assertNotIn("used_pct_exact", mismatched["weekly"])
+    conflict = collector.reconcile_claude_snapshot(tui, {**raw, "weekly": {**raw["weekly"], "used_pct_exact": 98.5}}, now)
+    self.assertEqual("conflict", conflict["weekly"]["status"])
+    self.assertNotIn("used_pct", conflict["weekly"])
+    self.assertFalse(collector.usage_live(conflict))
+    malformed_conflict = {**conflict, "weekly": {**conflict["weekly"], "used_pct": 98}}
+    self.assertIsNone(collector.normalized_claude_quota(malformed_conflict))
+    with tempfile.TemporaryDirectory() as tmpdir, patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", Path(tmpdir) / "cache.json"):
+      collector.write_claude_quota_cache(now, conflict)
+      self.assertEqual(conflict, collector.read_claude_quota_cache(now, 300))
+      self.assertIsNone(collector.read_claude_quota_cache(now + timedelta(seconds=301), 900))
+
+  def test_claude_live_conflict_replaces_old_known_cache(self) -> None:
+    now = datetime(2026, 10, 16, 12, tzinfo=collector.TZ)
+    old = {
+        "h5": {"used_pct": 10, "reset": "Oct 16, 1:30pm"},
+        "weekly": {"used_pct": 20, "reset": "Oct 17, 5:00pm"},
+    }
+    fresh = {
+        "h5": {"used_pct": 99, "reset": "Oct 16, 1:30pm", "used_pct_exact": 99.6},
+        "weekly": {"status": "conflict", "reset": "Oct 17, 5:00pm"},
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+      path = Path(tmpdir) / "cache.json"
+      path.write_text(json.dumps({"captured_at": (now - timedelta(minutes=6)).isoformat(), "usage": old}), encoding="utf-8")
+      with patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", path), \
+           patch.object(collector, "claude_usage_from_tui", return_value=fresh):
+        result = collector.claude_usage(now, now - timedelta(days=4))
+        stored = collector.read_claude_quota_cache(now, 300)
+    self.assertEqual(fresh, result)
+    self.assertEqual(fresh, stored)
+    self.assertFalse(collector.usage_live(result))
+
+  def test_claude_tui_ignores_old_scrollback_warning_when_viewport_is_fresh(self) -> None:
+    now = datetime(2026, 10, 16, 12, tzinfo=collector.TZ)
+    rows = (
+        "Current session\n99% 99% used\nResets 1:30pm (Asia/Taipei)\n"
+        "Current week (all models)\n100% 100% used\nResets Oct 17, 5pm (Asia/Taipei)\n"
+    )
+    old = "You've used 99% of your weekly limit\n" + rows
+    commands = []
+    def fake_run(args, **kwargs):
+      commands.append(args)
+      if args[:2] == ["tmux", "capture-pane"]:
+        return SimpleNamespace(stdout=old if "-S" in args else rows)
+      return SimpleNamespace(stdout="")
+    with tempfile.TemporaryDirectory() as tmpdir, \
+         patch.object(collector.Path, "home", return_value=Path(tmpdir)), \
+         patch.object(collector.subprocess, "run", side_effect=fake_run), \
+         patch.object(collector.time, "sleep"), \
+         patch.object(collector, "read_claude_usage_snapshot", return_value=None):
+      result = collector.claude_usage_from_tui(now)
+    self.assertEqual(100, result["weekly"]["used_pct"])
+    self.assertTrue(any(command[:2] == ["tmux", "capture-pane"] and "-S" not in command for command in commands))
 
   def test_atomic_write_json_removes_temp_file_on_failure(self) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
