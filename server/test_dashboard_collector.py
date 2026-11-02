@@ -859,6 +859,58 @@ class CollectorReliabilityTests(unittest.TestCase):
     self.assertEqual(5, usage["h5"]["used_pct"])
     self.assertEqual(44, usage["weekly"]["used_pct"])
 
+  def test_claude_status_without_session_row_is_a_plan_without_5h_limit(self) -> None:
+    # Real node5 /usage capture, 2026-11-02 (Max 20x has no 5h window). Requiring
+    # the session row blanked the weekly quota as parse_failed too.
+    now = datetime(2026, 11, 2, 13, 40, tzinfo=collector.TZ)
+    capture = (
+        "Settings  Status   Config   Usage   Stats\nSession\nTotal cost:            $0.0000\n"
+        "Current week (all models)\n27% 27% used\nResets Nov 6, 9am (UTC)\n"
+        "What's contributing to your usage?\n"
+    )
+    usage = collector.parse_claude_status(capture, now)
+
+    self.assertEqual({"reset": "--", "status": "no_limit"}, usage["h5"])
+    self.assertEqual({"used_pct": 27, "reset": "Nov 6, 5:00pm"}, usage["weekly"])
+    self.assertTrue(collector.usage_live(usage))
+    self.assertEqual(usage, collector.normalized_claude_quota(usage))
+    # The /status tab (no week row) is still a failed read, not "no limit".
+    self.assertEqual("parse_failed", collector.parse_claude_status("Version: 2.1.316\nModel: opus\n", now))
+
+    raw = {"h5": None, "weekly": {"used_pct_exact": 27.4, "reset_at": datetime(2026, 11, 6, 17, tzinfo=collector.TZ)}}
+    reconciled = collector.reconcile_claude_snapshot(usage, raw, now)
+    self.assertEqual({"reset": "--", "status": "no_limit"}, reconciled["h5"])
+    self.assertEqual(27.4, reconciled["weekly"]["used_pct_exact"])
+
+    with tempfile.TemporaryDirectory() as tmpdir, patch.object(collector, "CLAUDE_QUOTA_CACHE_PATH", Path(tmpdir) / "cache.json"):
+      collector.write_claude_quota_cache(now, reconciled)
+      self.assertEqual(reconciled, collector.read_claude_quota_cache(now, 300))
+      with patch.object(collector, "claude_usage_from_tui", return_value="parse_failed"):
+        stale = collector.claude_usage(now + timedelta(seconds=collector.CLAUDE_QUOTA_REFRESH + 60), now)
+    self.assertEqual("no_limit", stale["h5"]["status"])
+    self.assertEqual("cached", stale["weekly"]["status"])
+
+  def test_claude_snapshot_accepts_a_missing_five_hour_window(self) -> None:
+    now = datetime(2026, 11, 2, 5, 40, tzinfo=timezone.utc)
+    state = {
+        "oauthAccount": {"accountUuid": "account"},
+        "cachedUsageUtilization": {
+            "accountUuid": "account",
+            "fetchedAtMs": int(now.timestamp() * 1000),
+            "utilization": {
+                "five_hour": None,
+                "seven_day": {"utilization": 27, "resets_at": "2026-11-06T09:00:00.288330+00:00"},
+            },
+        },
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+      path = Path(tmpdir) / "state.json"
+      path.write_text(json.dumps(state), encoding="utf-8")
+      with patch.object(collector, "CLAUDE_STATE_PATH", path):
+        snapshot = collector.read_claude_usage_snapshot(now, now - timedelta(seconds=30))
+    self.assertIsNone(snapshot["h5"])
+    self.assertEqual(27, snapshot["weekly"]["used_pct_exact"])
+
   def test_claude_status_reports_why_a_read_failed(self) -> None:
     now = datetime(2026, 9, 14, 11, 10, tzinfo=collector.TZ)
     self.assertEqual("not_logged_in", collector.parse_claude_status("Not logged in · Run /login\n", now))

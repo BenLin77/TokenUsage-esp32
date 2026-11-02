@@ -158,6 +158,11 @@ def unavailable_quota(reset: str = "--", status: str = "unavailable") -> dict:
   return {"reset": reset, "status": status}
 
 
+# A window the plan does not have at all (Claude Max 20x dropped the 5h
+# session limit on 2026-10-31). Complete and live, just without a number.
+NO_LIMIT = "no_limit"
+
+
 def unknown_usage(status: str = "unavailable") -> dict:
   return {
       "h5": unavailable_quota(status=status),
@@ -171,7 +176,10 @@ def quota_known(block: object) -> bool:
 
 
 def usage_complete(usage: dict) -> bool:
-  return all(quota_known(usage.get(window)) for window in ("h5", "weekly"))
+  return all(
+      quota_known(block) or (isinstance(block, dict) and block.get("status") == NO_LIMIT)
+      for block in (usage.get("h5"), usage.get("weekly"))
+  )
 
 
 def usage_live(usage: dict) -> bool:
@@ -847,10 +855,10 @@ def normalized_claude_quota(usage: object) -> dict | None:
     block = usage[window]
     reset = block.get("reset")
     reset = reset if isinstance(reset, str) and reset else "--"
-    if block.get("status") == "conflict":
+    if block.get("status") in ("conflict", NO_LIMIT):
       if "used_pct" in block or "used_pct_exact" in block:
         return None
-      normalized[window] = unavailable_quota(reset, "conflict")
+      normalized[window] = unavailable_quota(reset, block["status"])
       continue
     used = block.get("used_pct")
     if type(used) is not int or not 0 <= used <= 100:
@@ -918,7 +926,7 @@ def claude_usage(now: datetime, week_start: datetime) -> dict:
   cached_usage = read_claude_quota_cache(now, CLAUDE_QUOTA_CACHE_TTL)
   if cached_usage is not None:
     for block in cached_usage.values():
-      if block.get("status") != "conflict":
+      if block.get("status") not in ("conflict", NO_LIMIT):
         block["status"] = "cached"
     return cached_usage
 
@@ -957,15 +965,12 @@ def claude_usage_from_tui(now: datetime) -> dict | str:
         timeout=5,
     )
     time.sleep(float(os.environ.get("DASH_CLAUDE_TUI_START_WAIT", "4")))
-    subprocess.run(["tmux", "send-keys", "-t", session, "/status", "Enter"], check=True, timeout=5)
-    time.sleep(float(os.environ.get("DASH_CLAUDE_TUI_STATUS_WAIT", "2")))
+    # Open the Usage screen directly: since Claude Code 2.1.316, Tab/Right +
+    # Enter inside /status no longer reaches it. The rows load asynchronously,
+    # so capture a few frames.
+    subprocess.run(["tmux", "send-keys", "-t", session, "/usage", "Enter"], check=True, timeout=5)
 
-    for keys in (
-        ["Tab", "Tab", "Tab", "Enter"],
-        ["Right", "Right", "Right", "Enter"],
-        ["Tab", "Tab", "Enter"],
-    ):
-      subprocess.run(["tmux", "send-keys", "-t", session, *keys], check=True, timeout=5)
+    for _ in range(3):
       time.sleep(float(os.environ.get("DASH_CLAUDE_TUI_TAB_WAIT", "2")))
       captures.append(
           subprocess.run(
@@ -1013,6 +1018,9 @@ def read_claude_usage_snapshot(now: datetime, started_at: datetime) -> dict | No
     result = {}
     for window, key in (("h5", "five_hour"), ("weekly", "seven_day")):
       raw = cached["utilization"][key]
+      if raw is None and window == "h5":
+        result[window] = None  # plan without a 5h window
+        continue
       exact = raw["utilization"]
       if type(exact) not in (int, float) or not math.isfinite(exact) or not 0 <= exact <= 100:
         return None
@@ -1034,10 +1042,10 @@ def reconcile_claude_snapshot(usage: dict, snapshot: dict | None, now: datetime)
   result = {window: block.copy() for window, block in usage.items()}
   for window in ("h5", "weekly"):
     block = result[window]
-    if block.get("status") == "conflict":
+    raw = snapshot[window]
+    if block.get("status") in ("conflict", NO_LIMIT) or raw is None:
       continue
     tui_reset = parse_datetime_target(block["reset"], now)
-    raw = snapshot[window]
     if tui_reset is None or tui_reset.astimezone(timezone.utc).replace(second=0, microsecond=0) != raw["reset_at"].astimezone(timezone.utc).replace(second=0, microsecond=0):
       continue
     exact = raw["used_pct_exact"]
@@ -1072,14 +1080,16 @@ def parse_claude_status(capture: str, now: datetime, warning_capture: str | None
       r"Current week(?: \(all models\))?\s+(?:\d+%\s+)?(\d+)%\s+used\s+Resets\s+([^\n]+)",
       capture,
   )
-  if not session_match or not week_match:
+  # The session row is drawn above the week row, so a frame that already shows
+  # the week but no session row means the plan has no 5h window.
+  if not week_match:
     return "parse_failed"
 
   result = {
       "h5": {
           "used_pct": max(0, min(100, int(session_match.group(1)))),
           "reset": compact_tui_reset(session_match.group(2), now),
-      },
+      } if session_match else unavailable_quota(status=NO_LIMIT),
       "weekly": {
           "used_pct": max(0, min(100, int(week_match.group(1)))),
           "reset": compact_tui_reset(week_match.group(2), now),

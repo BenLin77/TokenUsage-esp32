@@ -120,7 +120,8 @@ XL9555 LED1 (`boardSetLed`) — no on-screen border.
 - `used_pct` is *used*. Optional `used_pct_exact` preserves source precision;
   `quota_display.h` shows positive remaining below 1% as `<1%`. Keep the integer
   field for old firmware. `status: "conflict"` omits both percentages and shows
-  `sync` / 更新中 on the dashboard and detail page.
+  `sync` / 更新中 on the dashboard and detail page. `status: "no_limit"` (no
+  percentages) means the plan has no such window and shows `No limit` / 無上限.
 - `condition` keywords → `parseWeatherKind()` in `main.cpp` and
   `condition_for_weather_code()` / `cwa_condition_from_text()` in the collector.
   **Keep these in sync** when adding a weather type.
@@ -171,8 +172,11 @@ touching `board_config.h` or the render target.
   forms are handled. Never derive quota percentage from `ccusage` token totals:
   missing/auth-blocked windows are emitted as `status: "unavailable"` without
   `used_pct`, while confirmed exhaustion is `used_pct: 100`.
-- **Claude quota** is scraped from the Claude `/status` Usage screen via `tmux`
-  (`claude_usage_from_tui` → `parse_claude_status`). A read younger than
+- **Claude quota** is scraped from the Claude Usage screen via `tmux`, opened
+  directly with `/usage` (Tab-cycling inside `/status` stopped reaching it in
+  Claude Code 2.1.316) (`claude_usage_from_tui` → `parse_claude_status`). The
+  weekly row is required; a frame without a `Current session` row means the plan
+  has no 5h window (Max 20x since 2026-10-31) and `h5` is `status: "no_limit"`. A read younger than
   `DASH_CLAUDE_QUOTA_REFRESH` seconds (default 300) is served as live without
   relaunching the TUI (each launch costs ~30 s CPU). A failed TUI read falls back
   to the last good value for `DASH_CLAUDE_QUOTA_CACHE_TTL` seconds (default 900,

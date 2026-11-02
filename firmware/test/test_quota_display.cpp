@@ -28,6 +28,12 @@ int main() {
   expectText(conflict, "sync");
   expectText(conflict, "更新中", true);
 
+  QuotaDisplay noLimit;
+  noLimit.noLimit = true;
+  assert(!noLimit.known && quotaRemaining(noLimit) < 0);
+  expectText(noLimit, "No limit");
+  expectText(noLimit, "無上限", true);
+
   // Malformed optional precision cannot conceal a valid legacy integer.
   expectText(selectQuotaDisplay(false, true, std::numeric_limits<double>::quiet_NaN(), true, 99, false), "1%");
   expectText(selectQuotaDisplay(false, true, std::numeric_limits<double>::infinity(), true, 99, false), "1%");

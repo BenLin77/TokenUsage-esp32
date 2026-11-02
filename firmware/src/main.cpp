@@ -883,7 +883,7 @@ void drawQuotaBlock(int x, int y, int w, const char* label, const QuotaState& qu
   // value lives on the detail page) so the large number never collides. Sits a
   // little lower so the label's descenders (the y in "Weekly") aren't clipped.
   gfx->setTextColor(COLOR_TEXT, COLOR_PANEL);
-  if (quota.display.conflict) {
+  if (quota.display.conflict || quota.display.noLimit) {
     setUiFont24();
     gfx->setCursor(x, y + 27);
     gfx->print(remainingText);
@@ -1069,6 +1069,7 @@ void applyQuota(JsonVariantConst src, QuotaState& dst) {
                                    exactNumber, exactNumber ? exact.as<double>() : 0,
                                    src["used_pct"].is<int>(), src["used_pct"] | 0,
                                    status && (strcmp(status, "exhausted") == 0 || strcmp(status, "limited") == 0));
+  dst.display.noLimit = status && strcmp(status, "no_limit") == 0;
   if (src["reset"].is<const char*>()) {
     dst.reset = boundedText(src["reset"].as<const char*>(), MAX_RESET_TEXT);
   } else if (!dst.display.known) {
@@ -1429,7 +1430,7 @@ void drawRateSummary(int x, int y, const char* label, const QuotaState& quota) {
   gfx->print(label);
   gfx->setTextColor(quota.display.known ? colorForRemaining(rem) : COLOR_MUTED, COLOR_PANEL);
   gfx->setCursor(x + 44, y);
-  if (quota.display.conflict) {
+  if (quota.display.conflict || quota.display.noLimit) {
     gfx->print(remainingText);
   } else if (quota.display.known) {
     if (zhUi()) gfx->print("剩 ");

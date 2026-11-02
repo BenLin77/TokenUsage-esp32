@@ -6,6 +6,7 @@
 struct QuotaDisplay {
   bool known = false;
   bool conflict = false;
+  bool noLimit = false;  // the plan has no such window (status "no_limit")
   bool hasExact = false;
   int usedPct = 0;
   double exactUsedPct = 0;
@@ -41,6 +42,10 @@ inline void formatQuotaRemaining(const QuotaDisplay& quota, char* out, size_t si
   if (size == 0) return;
   if (quota.conflict) {
     std::snprintf(out, size, "%s", chinese ? "更新中" : "sync");
+    return;
+  }
+  if (quota.noLimit) {
+    std::snprintf(out, size, "%s", chinese ? "無上限" : "No limit");
     return;
   }
   if (!quota.known) {

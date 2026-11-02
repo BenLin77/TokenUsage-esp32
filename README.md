@@ -244,7 +244,7 @@ The firmware expects this JSON shape:
 
 Optional weather extras: `aqi` (US AQI, colour-coded on the tile), `uv` (max UV index), `sunrise`/`sunset` (`HH:MM`), and `city_zh` (localised city name shown when the device UI is switched to Traditional Chinese). Each `agent.models` entry (`name`, `pct`, `tok`) drives the detail-page model-mix bar. The device UI language (English/中文) and theme are chosen on-device in Settings; the JSON stays language-neutral.
 
-Optional `used_pct_exact` preserves source precision: `{"used_pct": 99, "used_pct_exact": 99.6}` displays `<1%` remaining, while an exact 100 displays `0%`. Without this field, the existing integer display is unchanged; no decimal precision is inferred. Conflicting readings use `status: "conflict"` with both percentage fields omitted, displaying `sync` (「更新中」 in Chinese).
+Optional `used_pct_exact` preserves source precision: `{"used_pct": 99, "used_pct_exact": 99.6}` displays `<1%` remaining, while an exact 100 displays `0%`. Without this field, the existing integer display is unchanged; no decimal precision is inferred. Conflicting readings use `status: "conflict"` with both percentage fields omitted, displaying `sync` (「更新中」 in Chinese). A window the plan does not have (e.g. Claude Max 20x has no 5h limit) uses `status: "no_limit"` with both percentage fields omitted, displaying `No limit` (「無上限」).
 
 ## Build And Upload
 
